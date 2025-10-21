@@ -19,7 +19,7 @@
   srcExe = fetchurl {
     # NOTE: `?v=0.13.37
     url = "https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe?v=0.13.37";
-    hash = "sha256-INTMOEOnq93sZ4Sr8EGja8dzVrtbp93+UQ5d3xvHVaA=";
+    hash = "sha256-u7zw3Nv/iYd8k7D6/SQkbtsQ22V8xdq63+R4HMtapzE=";
   };
 in
   stdenvNoCC.mkDerivation rec {
