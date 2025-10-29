@@ -15,11 +15,11 @@
   glib-networking
 }: let
   pname = "claude-desktop";
-  version = "0.14.4";
+  version = "0.14.10";
   srcExe = fetchurl {
-    # NOTE: `?v=0.14.4
-    url = "https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe?v=0.14.4";
-    hash = "sha256-d0hI6idjoKrlyMNNup36/zigwZbWpO0kkHxXaNhmJJ8==";
+    # NOTE: `?v=0.14.10
+    url = "https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe?v=0.14.10";
+    hash = "sha256-Sn/lvMlfKd7b/utFvCxrkWNDJTug4OOSA4lo9YV8aqk==";
   };
 in
   stdenvNoCC.mkDerivation rec {
