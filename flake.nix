@@ -10,7 +10,8 @@
     self,
     nixpkgs,
     flake-utils,
-  }: flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system: let
+  }:
+    flake-utils.lib.eachSystem ["x86_64-linux" "aarch64-linux"] (system: let
       pkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;
@@ -46,7 +47,7 @@
             ln -sf $out/bin/claude-desktop-bwrap $out/bin/claude-desktop
           '';
         };
-        
+
         # Shell environment for MCP development/installation
         claude-desktop-shell = pkgs.buildFHSEnv {
           name = "claude-desktop-shell";
