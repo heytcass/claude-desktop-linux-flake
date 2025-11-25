@@ -20,35 +20,54 @@ jobs:
     - name: Setup Nix cache
       uses: DeterminateSystems/magic-nix-cache-action@v7
 
-    - name: Install dependencies
-      run: |
-        nix profile install nixpkgs#p7zip
-        nix profile install nixpkgs#curl
-
     - name: Check for new version
       id: check-version
       run: |
         # Get current version from flake
         CURRENT_VERSION=$(grep 'version = ' pkgs/claude-desktop.nix | cut -d'"' -f2)
         echo "Current version: $CURRENT_VERSION"
-        
-        # Download and check latest version
-        curl -s -o /tmp/claude-installer.exe "https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe"
-        LATEST_VERSION=$(7z l /tmp/claude-installer.exe | grep -i "AnthropicClaude" | head -1 | sed 's/.*AnthropicClaude-\([^-]*\)-.*/\1/')
+
+        # Check latest version from RELEASES file (much faster than downloading installer)
+        RELEASES_URL="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/RELEASES"
+        LATEST_VERSION=$(curl -s "$RELEASES_URL" | tail -1 | grep -oP 'AnthropicClaude-\K[0-9]+\.[0-9]+\.[0-9]+')
         echo "Latest version: $LATEST_VERSION"
-        
+
         if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
           echo "New version available: $LATEST_VERSION"
           echo "needs_update=true" >> $GITHUB_OUTPUT
           echo "new_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
-          
-          # Get SHA256 hash
-          NEW_HASH=$(sha256sum /tmp/claude-installer.exe | cut -d' ' -f1)
-          echo "new_hash=$NEW_HASH" >> $GITHUB_OUTPUT
         else
           echo "No update needed"
           echo "needs_update=false" >> $GITHUB_OUTPUT
         fi
+
+    - name: Install dependencies
+      if: steps.check-version.outputs.needs_update == 'true'
+      run: |
+        nix profile install nixpkgs#p7zip
+        nix profile install nixpkgs#curl
+
+    - name: Download installer and calculate hash
+      if: steps.check-version.outputs.needs_update == 'true'
+      id: download-hash
+      run: |
+        # Only download installer when we need to update (to get the hash)
+        echo "Downloading installer for version ${{ steps.check-version.outputs.new_version }}..."
+        curl -s -o /tmp/claude-installer.exe "https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe"
+
+        # Verify we got the correct version
+        DOWNLOADED_VERSION=$(7z l /tmp/claude-installer.exe | grep -i "AnthropicClaude" | head -1 | sed 's/.*AnthropicClaude-\([^-]*\)-.*/\1/')
+        echo "Downloaded version: $DOWNLOADED_VERSION"
+
+        if [ "$DOWNLOADED_VERSION" != "${{ steps.check-version.outputs.new_version }}" ]; then
+          echo "ERROR: Downloaded version ($DOWNLOADED_VERSION) doesn't match expected version (${{ steps.check-version.outputs.new_version }})"
+          exit 1
+        fi
+
+        # Get SHA256 hash
+        NEW_HASH=$(sha256sum /tmp/claude-installer.exe | cut -d' ' -f1)
+        echo "new_hash=$NEW_HASH" >> $GITHUB_OUTPUT
+        echo "SHA256: $NEW_HASH"
 
     - name: Update flake
       if: steps.check-version.outputs.needs_update == 'true'
@@ -57,7 +76,7 @@ jobs:
         sed -i 's/version = "[^"]*"/version = "${{ steps.check-version.outputs.new_version }}"/' pkgs/claude-desktop.nix
         sed -i 's/?v=[^"]*/?v=${{ steps.check-version.outputs.new_version }}/' pkgs/claude-desktop.nix
         # Convert hex hash to base64
-        NEW_HASH_B64=$(echo -n "${{ steps.check-version.outputs.new_hash }}" | xxd -r -p | base64 -w 0)
+        NEW_HASH_B64=$(echo -n "${{ steps.download-hash.outputs.new_hash }}" | xxd -r -p | base64 -w 0)
         sed -i "s|sha256-[^\"]*\"|sha256-${NEW_HASH_B64}=\"|" pkgs/claude-desktop.nix
 
     - name: Verify flake
