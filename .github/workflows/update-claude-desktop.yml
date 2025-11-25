@@ -14,12 +14,6 @@ jobs:
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Install Nix
-      uses: DeterminateSystems/nix-installer-action@v14
-
-    - name: Setup Nix cache
-      uses: DeterminateSystems/magic-nix-cache-action@v7
-
     - name: Check for new version
       id: check-version
       run: |
@@ -40,6 +34,14 @@ jobs:
           echo "No update needed"
           echo "needs_update=false" >> $GITHUB_OUTPUT
         fi
+
+    - name: Install Nix
+      if: steps.check-version.outputs.needs_update == 'true'
+      uses: DeterminateSystems/nix-installer-action@v14
+
+    - name: Setup Nix cache
+      if: steps.check-version.outputs.needs_update == 'true'
+      uses: DeterminateSystems/magic-nix-cache-action@v7
 
     - name: Install dependencies
       if: steps.check-version.outputs.needs_update == 'true'
