@@ -124,6 +124,19 @@ in
         echo "No MainWindowPage files found - title bar patch may not be needed"
       fi
 
+      # Claude Code platform patch - add Linux support
+      echo "Patching Claude Code platform detection for Linux..."
+      INDEX_FILE="app.asar.contents/.vite/build/index.js"
+      if [ -f "$INDEX_FILE" ]; then
+        # Add Linux platform support to getPlatform() function
+        # Original: if(process.platform==="win32")return"win32-x64";throw new Error
+        # Patched:  if(process.platform==="win32")return"win32-x64";if(process.platform==="linux")return"linux-x64";throw new Error
+        perl -i -pe 's{if\(process\.platform==="win32"\)return"win32-x64";throw}{if(process.platform==="win32")return"win32-x64";if(process.platform==="linux")return"linux-x64";throw}g' "$INDEX_FILE"
+        echo "Claude Code platform patch applied"
+      else
+        echo "Warning: index.js not found for Claude Code patch"
+      fi
+
       # Replace native bindings - Mac uses @ant/claude-native path
       echo "Replacing native bindings..."
       mkdir -p app.asar.contents/node_modules/@ant/claude-native
