@@ -4,7 +4,7 @@
   fetchurl,
   electron,
   p7zip,
-  icoutils,
+  libicns,
   nodePackages,
   imagemagick,
   makeDesktopItem,
@@ -15,11 +15,12 @@
   glib-networking
 }: let
   pname = "claude-desktop";
-  version = "0.14.10";
-  srcExe = fetchurl {
-    # NOTE: `?v=0.10.0` doesn't actually request a specific version. It's only being used here as a cache buster.
-    url = "https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe?v=${version}";
-    hash = "sha256-Sn/lvMlfKd7b/utFvCxrkWNDJTug4OOSA4lo9YV8aqk=";
+  version = "1.0.2339";
+  # Mac DMG source - actively updated, unlike Windows installer
+  srcDmg = fetchurl {
+    # The redirect URL provides the latest version; we pin to a specific version for reproducibility
+    url = "https://downloads.claude.ai/releases/darwin/universal/${version}/Claude-1782e27bb4481b2865073bfb82a97b5b23554636.dmg";
+    hash = "sha256-rwTUq1xU60duFmUCBKY71S6RAKX7WbLgY2Iz2pVS1XY=";
   };
 in
   stdenvNoCC.mkDerivation rec {
@@ -32,7 +33,7 @@ in
       nodePackages.asar
       makeWrapper
       imagemagick
-      icoutils
+      libicns
       perl
     ];
 
@@ -63,103 +64,108 @@ in
       mkdir -p $TMPDIR/build
       cd $TMPDIR/build
 
-      # Extract installer exe, and nupkg within it
-      7z x -y ${srcExe}
-      # List files to see what was extracted
-      echo "Files extracted from installer:"
-      ls -la *.nupkg || true
-      # Try to find the correct nupkg file
-      NUPKG_FILE=$(find . -maxdepth 1 -name "AnthropicClaude-*-full.nupkg" | head -1)
-      if [ -z "$NUPKG_FILE" ]; then
-        echo "ERROR: No nupkg file found!"
+      # Extract Mac DMG (7z handles HFS+ despite warnings)
+      echo "Extracting Mac DMG..."
+      7z x -y ${srcDmg} || true
+
+      # Verify extraction worked
+      if [ ! -d "Claude/Claude.app" ]; then
+        echo "ERROR: Failed to extract Claude.app from DMG"
+        ls -la
         exit 1
       fi
-      echo "Found nupkg file: $NUPKG_FILE"
-      7z x -y "$NUPKG_FILE"
 
-      # Package the icons from claude.exe
-      wrestool -x -t 14 lib/net45/claude.exe -o claude.ico
-      icotool -x claude.ico
+      APP_CONTENTS="$TMPDIR/build/Claude/Claude.app/Contents"
+      RESOURCES="$APP_CONTENTS/Resources"
 
-      for size in 16 24 32 48 64 256; do
+      echo "Extracted app contents:"
+      ls -la "$RESOURCES"
+
+      # Extract icons from electron.icns
+      echo "Extracting icons from electron.icns..."
+      icns2png -x "$RESOURCES/electron.icns"
+
+      for size in 16 32 48 128 256 512; do
         mkdir -p $TMPDIR/build/icons/hicolor/"$size"x"$size"/apps
-        install -Dm 644 claude_*"$size"x"$size"x32.png \
-          $TMPDIR/build/icons/hicolor/"$size"x"$size"/apps/claude.png
+        if [ -f "electron_"$size"x"$size"x32.png" ]; then
+          install -Dm 644 "electron_"$size"x"$size"x32.png" \
+            $TMPDIR/build/icons/hicolor/"$size"x"$size"/apps/claude.png
+        elif [ -f "electron_"$size"x"$size".png" ]; then
+          install -Dm 644 "electron_"$size"x"$size".png" \
+            $TMPDIR/build/icons/hicolor/"$size"x"$size"/apps/claude.png
+        fi
       done
 
-      rm claude.ico
-
       # Process app.asar files
-      # We need to replace claude-native-bindings.node in both the
-      # app.asar package and .unpacked directory
       mkdir -p electron-app
-      cp "lib/net45/resources/app.asar" electron-app/
-      cp -r "lib/net45/resources/app.asar.unpacked" electron-app/
+      cp "$RESOURCES/app.asar" electron-app/
+      cp -r "$RESOURCES/app.asar.unpacked" electron-app/
 
       cd electron-app
       asar extract app.asar app.asar.contents
 
-      echo "Using search pattern: '$TARGET_PATTERN' within search base: '$SEARCH_BASE'"
+      # Title bar patch - check if needed for Mac source
       SEARCH_BASE="app.asar.contents/.vite/renderer/main_window/assets"
       TARGET_PATTERN="MainWindowPage-*.js"
 
       echo "Searching for '$TARGET_PATTERN' within '$SEARCH_BASE'..."
-      # Find the target file recursively (ensure only one matches)
-      TARGET_FILES=$(find "$SEARCH_BASE" -type f -name "$TARGET_PATTERN")
-      # Count non-empty lines to get the number of files found
-      NUM_FILES=$(echo "$TARGET_FILES" | grep -c .)
-      echo "Found $NUM_FILES matching files"
-      echo "Target files: $TARGET_FILES"
+      TARGET_FILES=$(find "$SEARCH_BASE" -type f -name "$TARGET_PATTERN" 2>/dev/null || true)
+      NUM_FILES=$(echo "$TARGET_FILES" | grep -c . || echo 0)
 
-      echo "##############################################################"
-      echo "Removing "'!'" from 'if ("'!'"isWindows && isMainWindow) return null;'"
-      echo "detection flag to to enable title bar"
+      if [ "$NUM_FILES" -gt 0 ]; then
+        echo "Found $NUM_FILES matching files for title bar patch"
+        TARGET_FILE=$(echo "$TARGET_FILES" | head -1)
+        echo "Patching: $TARGET_FILE"
 
-      echo "Current working directory: '$PWD'"
-
-      echo "Searching for '$TARGET_PATTERN' within '$SEARCH_BASE'..."
-      # Find the target file recursively (ensure only one matches)
-      if [ "$NUM_FILES" -eq 0 ]; then
-        echo "Error: No file matching '$TARGET_PATTERN' found within '$SEARCH_BASE'." >&2
-        exit 1
-      elif [ "$NUM_FILES" -gt 1 ]; then
-        echo "Error: Expected exactly one file matching '$TARGET_PATTERN' within '$SEARCH_BASE', but found $NUM_FILES." >&2
-        echo "Found files:" >&2
-        echo "$TARGET_FILES" >&2
-        exit 1
+        # Apply title bar patch
+        perl -i -pe 's{if\(!(\w+)\s*&&\s*(\w+)\)}{if($1 && $2)}g' "$TARGET_FILE"
+        echo "Title bar patch applied"
       else
-        # Exactly one file found
-        TARGET_FILE="$TARGET_FILES" # Assign the found file path
-        echo "Found target file: $TARGET_FILE"
-
-        echo "Attempting to replace patterns like 'if(!VAR1 && VAR2)' with 'if(VAR1 && VAR2)' in $TARGET_FILE..."
-        perl -i -pe \
-          's{if\(!(\w+)\s*&&\s*(\w+)\)}{if($1 && $2)}g' \
-          "$TARGET_FILE"
-
-        # Verification: Check if the original pattern structure still exists
-        if ! grep -q -E '!\w+&&\w+' "$TARGET_FILE"; then
-          echo "Successfully replaced patterns like '!VAR1&&VAR2' with 'VAR1&&VAR2' in $TARGET_FILE"
-        else
-          echo "Warning: Some instances of '!VAR1&&VAR2' might still exist in $TARGET_FILE." >&2
-        fi        # Verification: Check if the original pattern structure still exists
+        echo "No MainWindowPage files found - title bar patch may not be needed"
       fi
-      echo "##############################################################"
-      # exit 1
 
-      # Replace native bindings
-      cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.contents/node_modules/claude-native/claude-native-binding.node
-      cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.unpacked/node_modules/claude-native/claude-native-binding.node
+      # Claude Code platform patch - add Linux support
+      echo "Patching Claude Code platform detection for Linux..."
+      INDEX_FILE="app.asar.contents/.vite/build/index.js"
+      if [ -f "$INDEX_FILE" ]; then
+        # Add Linux platform support to getPlatform() function
+        # Original: if(process.platform==="win32")return"win32-x64";throw new Error
+        # Patched:  if(process.platform==="win32")return"win32-x64";if(process.platform==="linux")return"linux-x64";throw new Error
+        perl -i -pe 's{if\(process\.platform==="win32"\)return"win32-x64";throw}{if(process.platform==="win32")return"win32-x64";if(process.platform==="linux")return"linux-x64";throw}g' "$INDEX_FILE"
+        echo "Claude Code platform patch applied"
+      else
+        echo "Warning: index.js not found for Claude Code patch"
+      fi
 
-      # .vite/build/index.js in the app.asar expects the Tray icons to be
-      # placed inside the app.asar.
+      # Replace native bindings - Mac uses @ant/claude-native path
+      echo "Replacing native bindings..."
+      mkdir -p app.asar.contents/node_modules/@ant/claude-native
+      mkdir -p app.asar.unpacked/node_modules/@ant/claude-native
+      cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.contents/node_modules/@ant/claude-native/claude-native-binding.node
+      cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.unpacked/node_modules/@ant/claude-native/claude-native-binding.node
+
+      # Create stub for @ant/claude-swift (Swift addon not available on Linux)
+      echo "Creating Swift addon stubs..."
+      mkdir -p app.asar.contents/node_modules/@ant/claude-swift/build/Release
+      mkdir -p app.asar.unpacked/node_modules/@ant/claude-swift/build/Release
+      # Use patchy-cnb as a stub for now - it will provide empty implementations
+      cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.contents/node_modules/@ant/claude-swift/build/Release/swift_addon.node
+      cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.unpacked/node_modules/@ant/claude-swift/build/Release/swift_addon.node
+
+      # Copy tray icons - use Dark variant as default for Linux (visible on dark themes)
+      # On macOS, "Template" icons are auto-inverted; Linux doesn't support this
       mkdir -p app.asar.contents/resources
-      ls ../lib/net45/resources/
-      cp ../lib/net45/resources/Tray* app.asar.contents/resources/
+      # Copy the Dark icons as the main TrayIconTemplate icons for Linux
+      cp "$RESOURCES"/TrayIconTemplate-Dark.png app.asar.contents/resources/TrayIconTemplate.png || true
+      cp "$RESOURCES"/TrayIconTemplate-Dark@2x.png app.asar.contents/resources/TrayIconTemplate@2x.png || true
+      cp "$RESOURCES"/TrayIconTemplate-Dark@3x.png app.asar.contents/resources/TrayIconTemplate@3x.png || true
+      # Also keep the Dark variants for any code that specifically looks for them
+      cp "$RESOURCES"/TrayIconTemplate-Dark*.png app.asar.contents/resources/ || true
+      cp "$RESOURCES"/Tray*.ico app.asar.contents/resources/ || true
 
       # Copy i18n json files
       mkdir -p app.asar.contents/resources/i18n
-      cp ../lib/net45/resources/*.json app.asar.contents/resources/i18n/
+      cp "$RESOURCES"/*.json app.asar.contents/resources/i18n/ || true
 
       # Repackage app.asar
       asar pack app.asar.contents app.asar
