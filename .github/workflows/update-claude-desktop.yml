@@ -21,15 +21,24 @@ jobs:
         CURRENT_VERSION=$(grep 'version = ' pkgs/claude-desktop.nix | cut -d'"' -f2)
         echo "Current version: $CURRENT_VERSION"
 
-        # Check latest version from RELEASES file (much faster than downloading installer)
-        RELEASES_URL="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/RELEASES"
-        LATEST_VERSION=$(curl -s "$RELEASES_URL" | tail -1 | grep -oP 'AnthropicClaude-\K[0-9]+\.[0-9]+\.[0-9]+')
+        # Check latest Mac DMG version via redirect
+        REDIRECT_URL=$(curl -sIL -w '%{url_effective}' -o /dev/null "https://claude.ai/api/desktop/darwin/universal/dmg/latest/redirect")
+        echo "Redirect URL: $REDIRECT_URL"
+
+        # Extract version from redirect URL (format: .../releases/darwin/universal/{version}/Claude-{hash}.dmg)
+        LATEST_VERSION=$(echo "$REDIRECT_URL" | grep -oP 'universal/\K[0-9]+\.[0-9]+\.[0-9]+(?=/)')
         echo "Latest version: $LATEST_VERSION"
+
+        if [ -z "$LATEST_VERSION" ]; then
+          echo "ERROR: Could not extract version from redirect URL"
+          exit 1
+        fi
 
         if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
           echo "New version available: $LATEST_VERSION"
           echo "needs_update=true" >> $GITHUB_OUTPUT
           echo "new_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "dmg_url=$REDIRECT_URL" >> $GITHUB_OUTPUT
         else
           echo "No update needed"
           echo "needs_update=false" >> $GITHUB_OUTPUT
@@ -43,43 +52,40 @@ jobs:
       if: steps.check-version.outputs.needs_update == 'true'
       uses: DeterminateSystems/magic-nix-cache-action@v7
 
-    - name: Install dependencies
-      if: steps.check-version.outputs.needs_update == 'true'
-      run: |
-        nix profile install nixpkgs#p7zip
-        nix profile install nixpkgs#curl
-
-    - name: Download installer and calculate hash
+    - name: Download DMG and calculate hash
       if: steps.check-version.outputs.needs_update == 'true'
       id: download-hash
       run: |
-        # Only download installer when we need to update (to get the hash)
-        echo "Downloading installer for version ${{ steps.check-version.outputs.new_version }}..."
-        curl -s -o /tmp/claude-installer.exe "https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe"
-
-        # Verify we got the correct version
-        DOWNLOADED_VERSION=$(7z l /tmp/claude-installer.exe | grep -i "AnthropicClaude" | head -1 | sed 's/.*AnthropicClaude-\([^-]*\)-.*/\1/')
-        echo "Downloaded version: $DOWNLOADED_VERSION"
-
-        if [ "$DOWNLOADED_VERSION" != "${{ steps.check-version.outputs.new_version }}" ]; then
-          echo "ERROR: Downloaded version ($DOWNLOADED_VERSION) doesn't match expected version (${{ steps.check-version.outputs.new_version }})"
-          exit 1
-        fi
+        echo "Downloading Mac DMG for version ${{ steps.check-version.outputs.new_version }}..."
+        curl -sL -o /tmp/claude.dmg "${{ steps.check-version.outputs.dmg_url }}"
 
         # Get SHA256 hash
-        NEW_HASH=$(sha256sum /tmp/claude-installer.exe | cut -d' ' -f1)
+        NEW_HASH=$(sha256sum /tmp/claude.dmg | cut -d' ' -f1)
         echo "new_hash=$NEW_HASH" >> $GITHUB_OUTPUT
         echo "SHA256: $NEW_HASH"
 
     - name: Update flake
       if: steps.check-version.outputs.needs_update == 'true'
       run: |
-        # Update version and hash in the nix file
+        # Update version in the nix file
         sed -i 's/version = "[^"]*"/version = "${{ steps.check-version.outputs.new_version }}"/' pkgs/claude-desktop.nix
-        sed -i 's/?v=[^"]*/?v=${{ steps.check-version.outputs.new_version }}/' pkgs/claude-desktop.nix
-        # Convert hex hash to base64
+
+        # Extract the DMG filename hash from the download URL
+        # URL format: .../Claude-{hash}.dmg
+        DMG_FILENAME=$(basename "${{ steps.check-version.outputs.dmg_url }}")
+        FILE_HASH=$(echo "$DMG_FILENAME" | sed 's/Claude-\(.*\)\.dmg/\1/')
+        echo "DMG filename hash: $FILE_HASH"
+
+        # Update only the filename hash in the URL (keep ${version} interpolation)
+        sed -i "s|/Claude-[^\"]*\.dmg\"|/Claude-${FILE_HASH}.dmg\"|" pkgs/claude-desktop.nix
+
+        # Convert hex hash to SRI format for the content hash
         NEW_HASH_B64=$(echo -n "${{ steps.download-hash.outputs.new_hash }}" | xxd -r -p | base64 -w 0)
-        sed -i "s|sha256-[^\"]*\"|sha256-${NEW_HASH_B64}=\"|" pkgs/claude-desktop.nix
+        sed -i "s|sha256-[^\"]*\"|sha256-${NEW_HASH_B64}\"|" pkgs/claude-desktop.nix
+
+        # Show the changes
+        echo "Updated nix file:"
+        grep -A3 'srcDmg = fetchurl' pkgs/claude-desktop.nix
 
     - name: Verify flake
       if: steps.check-version.outputs.needs_update == 'true'
@@ -93,20 +99,20 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
         commit-message: |
           feat: update Claude Desktop to version ${{ steps.check-version.outputs.new_version }}
-          
-          🤖 Automated update via GitHub Actions
+
+          🤖 Automated update via GitHub Actions (Mac source)
         title: 'Update Claude Desktop to version ${{ steps.check-version.outputs.new_version }}'
         body: |
           ## Summary
           - Updates Claude Desktop from current version to ${{ steps.check-version.outputs.new_version }}
-          - SHA256 hash updated for new installer
+          - SHA256 hash updated for new Mac DMG
           - Flake check passed successfully
-          
+
           ## Test plan
           - [ ] Verify the flake builds successfully
           - [ ] Test the updated application runs correctly
           - [ ] Confirm all functionality works as expected
-          
+
           🤖 This PR was created automatically by GitHub Actions
         branch: update-claude-desktop-${{ steps.check-version.outputs.new_version }}
         delete-branch: true
