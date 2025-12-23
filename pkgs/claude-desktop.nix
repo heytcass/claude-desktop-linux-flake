@@ -152,9 +152,15 @@ in
       cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.contents/node_modules/@ant/claude-swift/build/Release/swift_addon.node
       cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.unpacked/node_modules/@ant/claude-swift/build/Release/swift_addon.node
 
-      # Copy tray icons (already in Resources for Mac)
+      # Copy tray icons - use Dark variant as default for Linux (visible on dark themes)
+      # On macOS, "Template" icons are auto-inverted; Linux doesn't support this
       mkdir -p app.asar.contents/resources
-      cp "$RESOURCES"/TrayIconTemplate*.png app.asar.contents/resources/ || true
+      # Copy the Dark icons as the main TrayIconTemplate icons for Linux
+      cp "$RESOURCES"/TrayIconTemplate-Dark.png app.asar.contents/resources/TrayIconTemplate.png || true
+      cp "$RESOURCES"/TrayIconTemplate-Dark@2x.png app.asar.contents/resources/TrayIconTemplate@2x.png || true
+      cp "$RESOURCES"/TrayIconTemplate-Dark@3x.png app.asar.contents/resources/TrayIconTemplate@3x.png || true
+      # Also keep the Dark variants for any code that specifically looks for them
+      cp "$RESOURCES"/TrayIconTemplate-Dark*.png app.asar.contents/resources/ || true
       cp "$RESOURCES"/Tray*.ico app.asar.contents/resources/ || true
 
       # Copy i18n json files
