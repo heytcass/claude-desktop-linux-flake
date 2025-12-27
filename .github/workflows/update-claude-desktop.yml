@@ -21,17 +21,21 @@ jobs:
         CURRENT_VERSION=$(grep 'version = ' pkgs/claude-desktop.nix | cut -d'"' -f2)
         echo "Current version: $CURRENT_VERSION"
 
-        # Check latest Mac DMG version via redirect
-        REDIRECT_URL=$(curl -sIL -w '%{url_effective}' -o /dev/null "https://claude.ai/api/desktop/darwin/universal/dmg/latest/redirect")
+        # Check latest Mac DMG version via redirect API
+        # Note: This may be blocked by Cloudflare from GitHub Actions IPs
+        REDIRECT_URL=$(curl -sIL -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" \
+          -w '%{url_effective}' -o /dev/null \
+          "https://claude.ai/api/desktop/darwin/universal/dmg/latest/redirect" 2>/dev/null || echo "")
         echo "Redirect URL: $REDIRECT_URL"
 
         # Extract version from redirect URL (format: .../releases/darwin/universal/{version}/Claude-{hash}.dmg)
-        LATEST_VERSION=$(echo "$REDIRECT_URL" | grep -oP 'universal/\K[0-9]+\.[0-9]+\.[0-9]+(?=/)')
+        LATEST_VERSION=$(echo "$REDIRECT_URL" | grep -oP 'universal/\K[0-9]+\.[0-9]+\.[0-9]+(?=/)' || echo "")
         echo "Latest version: $LATEST_VERSION"
 
         if [ -z "$LATEST_VERSION" ]; then
-          echo "ERROR: Could not extract version from redirect URL"
-          exit 1
+          echo "::warning::Could not detect latest version (Cloudflare may be blocking). Manual check recommended."
+          echo "needs_update=false" >> $GITHUB_OUTPUT
+          exit 0
         fi
 
         if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
