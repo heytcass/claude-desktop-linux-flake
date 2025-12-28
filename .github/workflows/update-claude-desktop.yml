@@ -2,8 +2,13 @@ name: Update Claude Desktop
 
 on:
   schedule:
-    - cron: '0 */3 * * *'  # Every 3 hours
-  workflow_dispatch:       # Allow manual triggering
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+    inputs:
+      dmg_url:
+        description: 'Full DMG download URL (optional - will auto-detect if not provided)'
+        required: false
+        type: string
 
 jobs:
   check-and-update:
@@ -14,26 +19,85 @@ jobs:
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Playwright
+      run: |
+        npm install playwright
+        npx playwright install chromium
+
     - name: Check for new version
       id: check-version
       run: |
         # Get current version from flake
         CURRENT_VERSION=$(grep 'version = ' pkgs/claude-desktop.nix | cut -d'"' -f2)
         echo "Current version: $CURRENT_VERSION"
+        echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
 
-        # Check latest Mac DMG version via redirect API
-        # Note: This may be blocked by Cloudflare from GitHub Actions IPs
-        REDIRECT_URL=$(curl -sIL -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" \
-          -w '%{url_effective}' -o /dev/null \
-          "https://claude.ai/api/desktop/darwin/universal/dmg/latest/redirect" 2>/dev/null || echo "")
+        # If manual DMG URL provided, use it directly
+        if [ -n "${{ inputs.dmg_url }}" ]; then
+          echo "Manual DMG URL provided: ${{ inputs.dmg_url }}"
+          LATEST_VERSION=$(echo "${{ inputs.dmg_url }}" | grep -oP 'universal/\K[0-9]+\.[0-9]+\.[0-9]+(?=/)' || echo "")
+          if [ -n "$LATEST_VERSION" ]; then
+            echo "Extracted version: $LATEST_VERSION"
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            echo "new_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+            echo "dmg_url=${{ inputs.dmg_url }}" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "::error::Could not extract version from provided URL"
+            exit 1
+          fi
+        fi
+
+        # Use Playwright to get the redirect URL (bypasses Cloudflare)
+        cat > get-version.js << 'EOF'
+        const { chromium } = require('playwright');
+
+        (async () => {
+          const browser = await chromium.launch({ headless: true });
+          const context = await browser.newContext();
+          const page = await context.newPage();
+
+          try {
+            // Navigate to the redirect endpoint
+            const response = await page.goto(
+              'https://claude.ai/api/desktop/darwin/universal/dmg/latest/redirect',
+              { waitUntil: 'domcontentloaded', timeout: 30000 }
+            );
+
+            // Get the final URL after any redirects
+            const finalUrl = page.url();
+            console.log(finalUrl);
+          } catch (error) {
+            // If we got redirected to a DMG, the URL should be in the error or we can check response
+            console.error('Error:', error.message);
+            process.exit(1);
+          } finally {
+            await browser.close();
+          }
+        })();
+        EOF
+
+        # Run the script
+        REDIRECT_URL=$(node get-version.js 2>&1 | grep -E '^https://downloads\.claude\.ai' | head -1 || echo "")
         echo "Redirect URL: $REDIRECT_URL"
 
-        # Extract version from redirect URL (format: .../releases/darwin/universal/{version}/Claude-{hash}.dmg)
+        if [ -z "$REDIRECT_URL" ]; then
+          echo "::warning::Could not detect latest version via browser automation"
+          echo "needs_update=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Extract version from redirect URL
         LATEST_VERSION=$(echo "$REDIRECT_URL" | grep -oP 'universal/\K[0-9]+\.[0-9]+\.[0-9]+(?=/)' || echo "")
         echo "Latest version: $LATEST_VERSION"
 
         if [ -z "$LATEST_VERSION" ]; then
-          echo "::warning::Could not detect latest version (Cloudflare may be blocking). Manual check recommended."
+          echo "::warning::Could not extract version from redirect URL"
           echo "needs_update=false" >> $GITHUB_OUTPUT
           exit 0
         fi
@@ -44,7 +108,7 @@ jobs:
           echo "new_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
           echo "dmg_url=$REDIRECT_URL" >> $GITHUB_OUTPUT
         else
-          echo "No update needed"
+          echo "No update needed - already on latest version"
           echo "needs_update=false" >> $GITHUB_OUTPUT
         fi
 
@@ -62,6 +126,12 @@ jobs:
       run: |
         echo "Downloading Mac DMG for version ${{ steps.check-version.outputs.new_version }}..."
         curl -sL -o /tmp/claude.dmg "${{ steps.check-version.outputs.dmg_url }}"
+
+        # Verify download succeeded
+        if [ ! -s /tmp/claude.dmg ]; then
+          echo "::error::Failed to download DMG"
+          exit 1
+        fi
 
         # Get SHA256 hash
         NEW_HASH=$(sha256sum /tmp/claude.dmg | cut -d' ' -f1)
