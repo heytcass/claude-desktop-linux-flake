@@ -58,22 +58,49 @@ jobs:
         const { chromium } = require('playwright');
 
         (async () => {
-          const browser = await chromium.launch({ headless: true });
-          const context = await browser.newContext();
+          const browser = await chromium.launch({
+            headless: true,
+            args: ['--disable-blink-features=AutomationControlled']
+          });
+          const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          });
           const page = await context.newPage();
 
           try {
+            console.error('Navigating to redirect URL...');
+
             // Navigate to the redirect endpoint
             const response = await page.goto(
               'https://claude.ai/api/desktop/darwin/universal/dmg/latest/redirect',
-              { waitUntil: 'domcontentloaded', timeout: 30000 }
+              { waitUntil: 'networkidle', timeout: 60000 }
             );
+
+            // Wait a bit for any Cloudflare challenge to complete
+            await page.waitForTimeout(5000);
 
             // Get the final URL after any redirects
             const finalUrl = page.url();
-            console.log(finalUrl);
+            console.error('Final URL: ' + finalUrl);
+
+            // Check if we're still on cloudflare challenge
+            const content = await page.content();
+            if (content.includes('challenge') || content.includes('Cloudflare')) {
+              console.error('Still on Cloudflare challenge page');
+              // Wait longer and try again
+              await page.waitForTimeout(10000);
+              const newUrl = page.url();
+              console.error('After wait URL: ' + newUrl);
+              if (newUrl.includes('downloads.claude.ai')) {
+                console.log(newUrl);
+              }
+            } else if (finalUrl.includes('downloads.claude.ai')) {
+              console.log(finalUrl);
+            } else {
+              console.error('Unexpected URL, page content preview:');
+              console.error(content.substring(0, 500));
+            }
           } catch (error) {
-            // If we got redirected to a DMG, the URL should be in the error or we can check response
             console.error('Error:', error.message);
             process.exit(1);
           } finally {
@@ -82,8 +109,10 @@ jobs:
         })();
         EOF
 
-        # Run the script
-        REDIRECT_URL=$(node get-version.js 2>&1 | grep -E '^https://downloads\.claude\.ai' | head -1 || echo "")
+        # Run the script and capture all output
+        echo "Running Playwright script..."
+        node get-version.js 2>&1 | tee /tmp/playwright-output.txt
+        REDIRECT_URL=$(grep -E '^https://downloads\.claude\.ai' /tmp/playwright-output.txt | head -1 || echo "")
         echo "Redirect URL: $REDIRECT_URL"
 
         if [ -z "$REDIRECT_URL" ]; then
