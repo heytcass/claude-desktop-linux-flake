@@ -133,6 +133,14 @@ in
         # Patched:  if(process.platform==="win32")return"win32-x64";if(process.platform==="linux")return"linux-x64";throw new Error
         perl -i -pe 's{if\(process\.platform==="win32"\)return"win32-x64";throw}{if(process.platform==="win32")return"win32-x64";if(process.platform==="linux")return"linux-x64";throw}g' "$INDEX_FILE"
         echo "Claude Code platform patch applied"
+
+        # Origin validation patch - allow file:// protocol when not packaged
+        # The app checks isPackaged===true for file:// URLs, but Nix runs with isPackaged=false
+        # Original: e.protocol==="file:"&&he.app.isPackaged===!0
+        # Patched:  e.protocol==="file:"
+        echo "Patching origin validation for file:// protocol..."
+        perl -i -pe 's{e\.protocol==="file:"&&\w+\.app\.isPackaged===!0}{e.protocol==="file:"}g' "$INDEX_FILE"
+        echo "Origin validation patch applied"
       else
         echo "Warning: index.js not found for Claude Code patch"
       fi
