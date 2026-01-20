@@ -141,6 +141,34 @@ in
         echo "Patching origin validation for file:// protocol..."
         perl -i -pe 's{e\.protocol==="file:"&&\w+\.app\.isPackaged===!0}{e.protocol==="file:"}g' "$INDEX_FILE"
         echo "Origin validation patch applied"
+
+        # Linux tray stability patches (from claude-desktop-debian)
+        # These fix common issues with system tray on Linux
+
+        # 1. Theme-aware tray icon selection
+        # macOS auto-inverts template icons; Linux needs explicit light/dark selection
+        # Patch: Use shouldUseDarkColors to pick the right icon variant
+        echo "Patching tray icon theme detection..."
+        perl -i -pe 's{:(\w)="TrayIconTemplate\.png"}{:$1=require("electron").nativeTheme.shouldUseDarkColors?"TrayIconTemplate-Dark.png":"TrayIconTemplate.png"}g' "$INDEX_FILE"
+
+        # 2. Tray menu concurrency guard (1500ms throttle)
+        # Prevents rapid tray menu calls that can crash on Linux
+        echo "Patching tray menu debouncing..."
+        # Find the tray click handler function and add debounce guard
+        # This pattern matches async tray handler functions
+        perl -i -pe 's{(async function \w+Tray\w*\(\)\{)}{$1 if(arguments.callee._running)return;arguments.callee._running=true;setTimeout(()=>arguments.callee._running=false,1500);}g' "$INDEX_FILE"
+
+        # 3. DBus cleanup delay (250ms)
+        # Allow proper StatusNotifierItem unregistration before recreation
+        echo "Patching DBus cleanup delay..."
+        perl -i -pe 's{(\w+)&&\(\1\.destroy\(\),\1=null\)}{$1&&($1.destroy(),$1=null,await new Promise(r=>setTimeout(r,250)))}g' "$INDEX_FILE"
+
+        # 4. Window blur before hide
+        # Fixes quick-submit focus issues on Linux
+        echo "Patching window blur before hide..."
+        perl -i -pe 's{(\w+)\.hide\(\)}{$1.blur(),$1.hide()}g' "$INDEX_FILE"
+
+        echo "Linux tray stability patches applied"
       else
         echo "Warning: index.js not found for Claude Code patch"
       fi
@@ -160,16 +188,31 @@ in
       cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.contents/node_modules/@ant/claude-swift/build/Release/swift_addon.node
       cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.unpacked/node_modules/@ant/claude-swift/build/Release/swift_addon.node
 
-      # Copy tray icons - use Dark variant as default for Linux (visible on dark themes)
-      # On macOS, "Template" icons are auto-inverted; Linux doesn't support this
+      # Copy tray icons and fix for Linux compatibility
+      # On macOS, "Template" icons are semi-transparent and auto-inverted by the OS
+      # Linux doesn't support this, so we need to:
+      # 1. Copy both light and dark variants
+      # 2. Make icons fully opaque (macOS templates are semi-transparent)
+      # 3. Patch JS to dynamically select based on theme
       mkdir -p app.asar.contents/resources
-      # Copy the Dark icons as the main TrayIconTemplate icons for Linux
-      cp "$RESOURCES"/TrayIconTemplate-Dark.png app.asar.contents/resources/TrayIconTemplate.png || true
-      cp "$RESOURCES"/TrayIconTemplate-Dark@2x.png app.asar.contents/resources/TrayIconTemplate@2x.png || true
-      cp "$RESOURCES"/TrayIconTemplate-Dark@3x.png app.asar.contents/resources/TrayIconTemplate@3x.png || true
-      # Also keep the Dark variants for any code that specifically looks for them
-      cp "$RESOURCES"/TrayIconTemplate-Dark*.png app.asar.contents/resources/ || true
+
+      # Copy all tray icon variants
+      cp "$RESOURCES"/TrayIconTemplate.png app.asar.contents/resources/ || true
+      cp "$RESOURCES"/TrayIconTemplate@2x.png app.asar.contents/resources/ || true
+      cp "$RESOURCES"/TrayIconTemplate@3x.png app.asar.contents/resources/ || true
+      cp "$RESOURCES"/TrayIconTemplate-Dark.png app.asar.contents/resources/ || true
+      cp "$RESOURCES"/TrayIconTemplate-Dark@2x.png app.asar.contents/resources/ || true
+      cp "$RESOURCES"/TrayIconTemplate-Dark@3x.png app.asar.contents/resources/ || true
       cp "$RESOURCES"/Tray*.ico app.asar.contents/resources/ || true
+
+      # Fix icon opacity - macOS template icons are semi-transparent for auto-inversion
+      # Linux panels need fully opaque icons to be visible
+      echo "Fixing tray icon opacity for Linux..."
+      for icon in app.asar.contents/resources/TrayIconTemplate*.png; do
+        if [ -f "$icon" ]; then
+          convert "$icon" -channel A -fx "a>0?1:0" "$icon" || true
+        fi
+      done
 
       # Copy i18n json files
       mkdir -p app.asar.contents/resources/i18n
@@ -198,15 +241,16 @@ in
       install -Dm0644 {${desktopItem},$out}/share/applications/Claude.desktop
 
       # Create wrapper
+      # NOTE: Global shortcuts (Ctrl+Alt+Space) don't work in native Wayland mode
+      # due to Electron/Chromium limitations. We default to X11/XWayland for compatibility.
+      # Set CLAUDE_USE_WAYLAND=1 to force native Wayland (shortcuts won't work).
       mkdir -p $out/bin
       makeWrapper ${electron}/bin/electron $out/bin/$pname \
         --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath [glib-networking]}" \
         --add-flags "$out/lib/$pname/app.asar" \
-        --add-flags "\''${NIXOS_OZONE_WL:+\''${WAYLAND_DISPLAY:+--ozone-platform-hint=auto --enable-features=WaylandWindowDecorations,UseOzonePlatform --gtk-version=4}}" \
-        --set-default NIXOS_OZONE_WL "\''${WAYLAND_DISPLAY:+1}" \
-        --set ELECTRON_OZONE_PLATFORM_HINT "auto" \
+        --add-flags "\''${CLAUDE_USE_WAYLAND:+--ozone-platform-hint=auto --enable-features=WaylandWindowDecorations,UseOzonePlatform --gtk-version=4}" \
         --set GIO_EXTRA_MODULES "${glib-networking}/lib/gio/modules" \
-        --set GDK_BACKEND "wayland,x11" \
+        --set-default GDK_BACKEND "x11" \
         --set CHROME_DESKTOP "Claude.desktop" \
         --set-default GTK_THEME "\''${GTK_THEME:-Adwaita:dark}" \
         --set-default COLOR_SCHEME_PREFERENCE "\''${COLOR_SCHEME_PREFERENCE:-dark}" \
