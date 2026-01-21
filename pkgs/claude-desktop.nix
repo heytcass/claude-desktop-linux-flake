@@ -15,12 +15,12 @@
   glib-networking
 }: let
   pname = "claude-desktop";
-  version = "1.1.280";
+  version = "1.1.381";
   # Mac DMG source - actively updated, unlike Windows installer
   srcDmg = fetchurl {
     # The redirect URL provides the latest version; we pin to a specific version for reproducibility
-    url = "https://downloads.claude.ai/releases/darwin/universal/${version}/Claude-3478247a3718c7070905d2d43416a99816d3e2ca.dmg";
-    hash = "sha256-fyYZZ+ilSBHEaowSf5n+0ZNHxj73xHskSkontGsUEMM=";
+    url = "https://downloads.claude.ai/releases/darwin/universal/${version}/Claude-c2a39e9c82f5a4d51f511f53f532afd276312731.dmg";
+    hash = "sha256-2nUTZ8Vxyi64I/Xrp0RWJVw3aBKb4Nw3sp7DNFqw39k=";
   };
 in
   stdenvNoCC.mkDerivation rec {
