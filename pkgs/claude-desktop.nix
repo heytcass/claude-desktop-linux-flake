@@ -16,12 +16,12 @@
 }:
 let
   pname = "claude-desktop";
-  version = "1.1.3770";
+  version = "1.1.4010";
   # Mac DMG source - actively updated, unlike Windows installer
+  # Version discovery: curl -s https://downloads.claude.ai/releases/darwin/universal/RELEASES.json
   srcDmg = fetchurl {
-    # The redirect URL provides the latest version; we pin to a specific version for reproducibility
-    url = "https://downloads.claude.ai/releases/darwin/universal/${version}/Claude-f7f5859a17386e383fad75f35ff6dd0f6e9dfd66.dmg";
-    hash = "sha256-dx+lYjSYN1vRMKGQdNYFJwxZAwfyoLjxlJUKd29c6+Y=";
+    url = "https://downloads.claude.ai/releases/darwin/universal/${version}/Claude-da63f369d7533437f1b59f14173962eb5b54c714.dmg";
+    hash = "sha256-4/KdukXwGXPo9ZjfUByKSw2VrPk9WaZMhvepbMSSRoU=";
   };
 in
 stdenvNoCC.mkDerivation rec {
@@ -152,12 +152,11 @@ stdenvNoCC.mkDerivation rec {
       echo "Patching tray icon theme detection..."
       perl -i -pe 's{:(\w)="TrayIconTemplate\.png"}{:$1=require("electron").nativeTheme.shouldUseDarkColors?"TrayIconTemplate-Dark.png":"TrayIconTemplate.png"}g' "$INDEX_FILE"
 
-      # 2. Tray menu concurrency guard (1500ms throttle)
-      # Prevents rapid tray menu calls that can crash on Linux
-      echo "Patching tray menu debouncing..."
-      # Find the tray click handler function and add debounce guard
-      # This pattern matches async tray handler functions
-      perl -i -pe 's{(async function \w+Tray\w*\(\)\{)}{$1 if(arguments.callee._running)return;arguments.callee._running=true;setTimeout(()=>arguments.callee._running=false,1500);}g' "$INDEX_FILE"
+      # 2. Tray recreation concurrency guard (1500ms throttle)
+      # Prevents rapid tray recreation that can crash on Linux
+      # Match by semantic signature: the only no-arg function starting with isReady() guard
+      echo "Patching tray recreation debouncing..."
+      perl -i -pe 's{(function \w+\(\)\{if\(![\w\$]+\.app\.isReady\(\)\)return;)}{$1if(global.__trayLock)return;global.__trayLock=true;setTimeout(()=>global.__trayLock=false,1500);}g' "$INDEX_FILE"
 
       # 3. DBus cleanup delay (250ms)
       # Allow proper StatusNotifierItem unregistration before recreation
@@ -221,6 +220,53 @@ stdenvNoCC.mkDerivation rec {
 
     # Repackage app.asar
     asar pack app.asar.contents app.asar
+
+    # ========================================================================
+    # Build-time patch verification
+    # ========================================================================
+    # Verify all patches applied by checking for marker strings in the
+    # patched source. Catches regex drift from minifier changes before
+    # the broken build reaches users.
+    echo "Verifying patches..."
+    VERIFY_FAILED=0
+
+    verify_patch() {
+      local name="$1" file="$2" marker="$3"
+      if grep -q "$marker" "$file"; then
+        echo "  OK: $name"
+      else
+        echo "  FAIL: $name — marker not found: $marker"
+        VERIFY_FAILED=1
+      fi
+    }
+
+    verify_patch "Platform detection (Linux)" \
+      "$INDEX_FILE" 'process.platform==="linux"'
+
+    verify_patch "Origin validation (file://)" \
+      "$INDEX_FILE" 'e.protocol==="file:"'
+
+    verify_patch "Tray icon theme detection" \
+      "$INDEX_FILE" 'shouldUseDarkColors'
+
+    verify_patch "Tray recreation debounce guard" \
+      "$INDEX_FILE" 'global.__trayLock'
+
+    verify_patch "DBus cleanup delay" \
+      "$INDEX_FILE" 'setTimeout(r,250)'
+
+    verify_patch "Window blur before hide" \
+      "$INDEX_FILE" '.blur(),'
+
+    if [ "$VERIFY_FAILED" -ne 0 ]; then
+      echo ""
+      echo "ERROR: One or more patches failed to apply."
+      echo "The upstream minified JS likely changed structure."
+      echo "Check the perl regex patterns against the current index.js."
+      exit 1
+    fi
+
+    echo "All patches verified."
 
     runHook postBuild
   '';
