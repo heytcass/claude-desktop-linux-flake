@@ -161,7 +161,7 @@ stdenvNoCC.mkDerivation rec {
       # 3. DBus cleanup delay (250ms)
       # Allow proper StatusNotifierItem unregistration before recreation
       echo "Patching DBus cleanup delay..."
-      perl -i -pe 's{(\w+)&&\(\1\.destroy\(\),\1=null\)}{$1&&($1.destroy(),$1=null,await new Promise(r=>setTimeout(r,250)))}g' "$INDEX_FILE"
+      perl -i -pe 's{(\w+)&&\(\1\.destroy\(\),\1=null\)}{$1&&(async()=>{$1.destroy(),$1=null,await new Promise(r=>setTimeout(r,250))})()}g' "$INDEX_FILE"
 
       # 4. Window blur before hide
       # Fixes quick-submit focus issues on Linux
