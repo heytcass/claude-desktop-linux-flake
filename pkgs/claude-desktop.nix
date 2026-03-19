@@ -16,12 +16,12 @@
 }:
 let
   pname = "claude-desktop";
-  version = "1.1.6452";
+  version = "1.1.7464";
   # Mac DMG source - actively updated, unlike Windows installer
   # Version discovery: curl -s https://downloads.claude.ai/releases/darwin/universal/RELEASES.json
   srcDmg = fetchurl {
-    url = "https://downloads.claude.ai/releases/darwin/universal/${version}/Claude-5afc23a0310b20a371d1fbd79ddf31a392ebef25.dmg";
-    hash = "sha256-KDbiojma/QvA0mzGgnkTsoTieJBWafLY+nGqLV3T1Sw=";
+    url = "https://downloads.claude.ai/releases/darwin/universal/${version}/Claude-2809b60543935626ef2d64d6bed0988205948463.dmg";
+    hash = "sha256-LW/wxTco6o1SWJmYMk/aMim0VdK99pLc1Whp4cMz9fM=";
   };
 in
 stdenvNoCC.mkDerivation rec {
