@@ -200,6 +200,7 @@ jobs:
 
     - name: Create Pull Request
       if: steps.check-version.outputs.needs_update == 'true'
+      id: create-pr
       uses: peter-evans/create-pull-request@v6
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
@@ -214,11 +215,12 @@ jobs:
           - SHA256 hash updated for new Mac DMG
           - Flake check passed successfully
 
-          ## Test plan
-          - [ ] Verify the flake builds successfully
-          - [ ] Test the updated application runs correctly
-          - [ ] Confirm all functionality works as expected
-
-          🤖 This PR was created automatically by GitHub Actions
+          🤖 This PR was created and auto-merged by GitHub Actions
         branch: update-claude-desktop-${{ steps.check-version.outputs.new_version }}
         delete-branch: true
+
+    - name: Auto-merge Pull Request
+      if: steps.create-pr.outputs.pull-request-number
+      run: gh pr merge ${{ steps.create-pr.outputs.pull-request-number }} --merge --delete-branch
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
