@@ -5,7 +5,7 @@
   electron,
   p7zip,
   libicns,
-  nodePackages,
+  asar,
   imagemagick,
   makeDesktopItem,
   makeWrapper,
@@ -31,7 +31,7 @@ stdenvNoCC.mkDerivation rec {
 
   nativeBuildInputs = [
     p7zip
-    nodePackages.asar
+    asar
     makeWrapper
     imagemagick
     libicns
