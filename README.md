@@ -7,7 +7,7 @@ If you run into an issue with this build script, make an issue here. Don't bug A
 Supports MCP!
 ![image](https://github.com/user-attachments/assets/93080028-6f71-48bd-8e59-5149d148cd45)
 
-Supports the Ctrl+Alt+Space popup!
+Supports the Ctrl+Alt+Space popup! (natively on Wayland via the XDG global-shortcuts portal on GNOME 48+/KDE — see [Display backend & global shortcuts](#display-backend--global-shortcuts))
 ![image](https://github.com/user-attachments/assets/1deb4604-4c06-4e4b-b63f-7f6ef9ef28c1)
 
 Supports the Tray menu! (Screenshot of running on KDE)
@@ -57,6 +57,35 @@ This flake includes comprehensive fixes for proper GNOME desktop integration, pa
 
 The integration has been thoroughly tested on GNOME 48 with Wayland and works reliably across different installation methods.
 
+## Display backend & global shortcuts
+
+The launcher defaults to **native Wayland** via `--ozone-platform-hint=auto`. On a
+Wayland session it runs natively on Wayland; on an X11 session it transparently
+falls back to X11, so the default is safe either way.
+
+Quick Entry's global shortcut (**Ctrl+Alt+Space**) works under native Wayland by
+routing through the **XDG GlobalShortcuts portal**. That path requires
+`xdg-desktop-portal` with a GlobalShortcuts backend:
+
+- **GNOME 48+** and **KDE Plasma** ship one. On GNOME a one-time permission dialog
+  appears the first time the shortcut is bound — approve it for the hotkey to work.
+- Compositors whose portal has no GlobalShortcuts backend (e.g. most wlroots
+  setups like Sway/Hyprland) silently make the feature a no-op — the global
+  hotkey won't fire under native Wayland there.
+
+If the portal route misbehaves on your compositor, set **`CLAUDE_USE_X11=1`** to
+force XWayland. That restores the older X11 key-grab global shortcut and the more
+mature IME/HiDPI rendering path.
+
+### Environment variables
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CLAUDE_USE_X11` | unset | Set to `1` to force XWayland (`--ozone-platform=x11`) instead of native Wayland. |
+| `GTK_USE_PORTAL` | `1` | Use the XDG portal for native file dialogs. Set to `0` to use Electron's built-in GTK dialogs. |
+| `GTK_THEME` | `Adwaita:dark` | Passed through to the app; override to change theming. |
+| `COLOR_SCHEME_PREFERENCE` | `dark` | Light/dark preference hint. |
+
 ## Other distributions
 
 This repository only provides a Nix flake, and does not provide a package for e.g. Ubuntu, Fedora, or Arch Linux.
@@ -102,6 +131,15 @@ Turns out, the original module also used NAPI-RS. Neat!
 
 From there, it's just a matter of compiling `patchy-cnb`, repackaging the app.asar to include the newly built Linux module, and
 making a new Electron build with these files.
+
+# Known limitations
+
+This is a repackaging of a macOS build, and a few things either don't work or work differently than on macOS. Rather than pretend otherwise:
+
+- **`patchy-cnb` is a stub.** The Windows/macOS `claude-native` module is reimplemented as no-ops: window/monitor enumeration returns empty, and the mouse/keyboard control entry points do nothing. Anything that would drive **Computer Use**-style screen/input control through these native bindings is therefore inert. The normal chat app does not depend on them, so day-to-day use is unaffected.
+- **Cowork / local-agent native features are not wired up.** This flake does **not** vendor the Cowork daemon, bubblewrap/KVM sandbox backends, or `node-pty` that the [aaddrick/claude-desktop-debian](https://github.com/aaddrick/claude-desktop-debian) build ships. Features that depend on the Cowork VM service won't be available here. If you need those, that project (which also offers a Nix flake) is the more complete option today.
+- **In-app auto-update is intentionally disabled.** On Nix the store path is read-only, so the app can't update itself. Updates are this repo's job instead: the weekly `update-claude-desktop` workflow reads Claude's `RELEASES.json`, repins the flake, and opens an auto-merging PR once a real `nix build` (including patch verification) passes. Bump your flake input to get the new version.
+- **Native Wayland global shortcuts depend on your compositor's portal.** See [Display backend & global shortcuts](#display-backend--global-shortcuts) — they work on GNOME 48+/KDE but are a no-op on portals without a GlobalShortcuts backend; use `CLAUDE_USE_X11=1` there.
 
 # License
 
