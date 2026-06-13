@@ -1,14 +1,23 @@
 name: Update Claude Desktop
 
+# Reads the latest version straight from Claude's macOS RELEASES.json
+# (the same manifest the app's own auto-updater uses), repins the flake,
+# runs a real `nix build` so the patch-verification step actually gates
+# the update, then opens an auto-merging PR.
+
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
+    - cron: '0 9 * * 1'  # Weekly, Mondays 09:00 UTC
   workflow_dispatch:
     inputs:
-      dmg_url:
-        description: 'Full DMG download URL (optional - will auto-detect if not provided)'
+      version:
+        description: 'Force a specific version (optional; auto-detected from RELEASES.json otherwise)'
         required: false
         type: string
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   check-and-update:
@@ -19,208 +28,119 @@ jobs:
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-
-    - name: Install Playwright
+    - name: Determine latest version
+      id: check
       run: |
-        npm install playwright
-        npx playwright install chromium
+        set -euo pipefail
 
-    - name: Check for new version
-      id: check-version
-      run: |
-        # Get current version from flake
-        CURRENT_VERSION=$(grep 'version = ' pkgs/claude-desktop.nix | cut -d'"' -f2)
-        echo "Current version: $CURRENT_VERSION"
-        echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+        CURRENT=$(grep -oP 'version = "\K[^"]+' pkgs/claude-desktop.nix | head -1)
+        echo "Current version: $CURRENT"
 
-        # If manual DMG URL provided, use it directly
-        if [ -n "${{ inputs.dmg_url }}" ]; then
-          echo "Manual DMG URL provided: ${{ inputs.dmg_url }}"
-          LATEST_VERSION=$(echo "${{ inputs.dmg_url }}" | grep -oP 'universal/\K[0-9]+\.[0-9]+\.[0-9]+(?=/)' || echo "")
-          if [ -n "$LATEST_VERSION" ]; then
-            echo "Extracted version: $LATEST_VERSION"
-            echo "needs_update=true" >> $GITHUB_OUTPUT
-            echo "new_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
-            echo "dmg_url=${{ inputs.dmg_url }}" >> $GITHUB_OUTPUT
-            exit 0
-          else
-            echo "::error::Could not extract version from provided URL"
-            exit 1
-          fi
-        fi
+        RELEASES_URL="https://downloads.claude.ai/releases/darwin/universal/RELEASES.json"
 
-        # Use Playwright to get the redirect URL (bypasses Cloudflare)
-        cat > get-version.js << 'EOF'
-        const { chromium } = require('playwright');
-
-        (async () => {
-          const browser = await chromium.launch({
-            headless: true,
-            args: ['--disable-blink-features=AutomationControlled']
-          });
-          const context = await browser.newContext({
-            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            acceptDownloads: true
-          });
-          const page = await context.newPage();
-
-          try {
-            console.error('Navigating to redirect URL...');
-
-            // Set up download handler to capture the download URL
-            const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
-
-            // Navigate - this will trigger a download
-            page.goto('https://claude.ai/api/desktop/darwin/universal/dmg/latest/redirect').catch(() => {});
-
-            // Wait for the download to start and get the URL
-            const download = await downloadPromise;
-            const downloadUrl = download.url();
-            console.error('Download URL captured: ' + downloadUrl);
-
-            // Cancel the download - we only need the URL
-            await download.cancel();
-
-            // Output the URL (this is what we grep for)
-            console.log(downloadUrl);
-
-          } catch (error) {
-            console.error('Error:', error.message);
-
-            // If download event times out, try checking response headers
-            console.error('Trying alternative method...');
-            try {
-              const response = await page.goto(
-                'https://claude.ai/api/desktop/darwin/universal/dmg/latest/redirect',
-                { waitUntil: 'commit', timeout: 30000 }
-              );
-              const headers = response?.headers();
-              if (headers?.location) {
-                console.log(headers.location);
-              }
-            } catch (e) {
-              console.error('Alternative method also failed:', e.message);
-            }
-            process.exit(1);
-          } finally {
-            await browser.close();
-          }
-        })();
-        EOF
-
-        # Run the script and capture all output
-        echo "Running Playwright script..."
-        node get-version.js 2>&1 | tee /tmp/playwright-output.txt
-        REDIRECT_URL=$(grep -E '^https://downloads\.claude\.ai' /tmp/playwright-output.txt | head -1 || echo "")
-        echo "Redirect URL: $REDIRECT_URL"
-
-        if [ -z "$REDIRECT_URL" ]; then
-          echo "::warning::Could not detect latest version via browser automation"
-          echo "needs_update=false" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-
-        # Extract version from redirect URL
-        LATEST_VERSION=$(echo "$REDIRECT_URL" | grep -oP 'universal/\K[0-9]+\.[0-9]+\.[0-9]+(?=/)' || echo "")
-        echo "Latest version: $LATEST_VERSION"
-
-        if [ -z "$LATEST_VERSION" ]; then
-          echo "::warning::Could not extract version from redirect URL"
-          echo "needs_update=false" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-
-        if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
-          echo "New version available: $LATEST_VERSION"
-          echo "needs_update=true" >> $GITHUB_OUTPUT
-          echo "new_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
-          echo "dmg_url=$REDIRECT_URL" >> $GITHUB_OUTPUT
+        if [ -n "${{ inputs.version }}" ]; then
+          LATEST="${{ inputs.version }}"
+          echo "Forced version: $LATEST"
         else
-          echo "No update needed - already on latest version"
-          echo "needs_update=false" >> $GITHUB_OUTPUT
+          LATEST=$(curl -fsSL "$RELEASES_URL" | jq -r '.currentRelease')
+          echo "Latest version (RELEASES.json): $LATEST"
         fi
 
-    - name: Install Nix
-      if: steps.check-version.outputs.needs_update == 'true'
-      uses: DeterminateSystems/nix-installer-action@v14
-
-    - name: Setup Nix cache
-      if: steps.check-version.outputs.needs_update == 'true'
-      uses: DeterminateSystems/magic-nix-cache-action@v7
-
-    - name: Download DMG and calculate hash
-      if: steps.check-version.outputs.needs_update == 'true'
-      id: download-hash
-      run: |
-        echo "Downloading Mac DMG for version ${{ steps.check-version.outputs.new_version }}..."
-        curl -sL -o /tmp/claude.dmg "${{ steps.check-version.outputs.dmg_url }}"
-
-        # Verify download succeeded
-        if [ ! -s /tmp/claude.dmg ]; then
-          echo "::error::Failed to download DMG"
+        if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
+          echo "::error::Could not read latest version from RELEASES.json"
           exit 1
         fi
 
-        # Get SHA256 hash
-        NEW_HASH=$(sha256sum /tmp/claude.dmg | cut -d' ' -f1)
-        echo "new_hash=$NEW_HASH" >> $GITHUB_OUTPUT
-        echo "SHA256: $NEW_HASH"
+        # The release manifest points at a .zip; the flake fetches the .dmg
+        # at the same path. The per-release filename hash is shared between
+        # them, so derive it from whichever artifact the manifest lists.
+        ARTIFACT_URL=$(curl -fsSL "$RELEASES_URL" \
+          | jq -r --arg v "$LATEST" \
+            '.releases[] | select(.updateTo.version == $v) | .updateTo.url' \
+          | head -1)
+        # Fall back to the current release's url if the per-version lookup misses.
+        if [ -z "$ARTIFACT_URL" ] || [ "$ARTIFACT_URL" = "null" ]; then
+          ARTIFACT_URL=$(curl -fsSL "$RELEASES_URL" | jq -r '.releases[0].updateTo.url')
+        fi
 
-    - name: Update flake
-      if: steps.check-version.outputs.needs_update == 'true'
+        FNAME=$(basename "$ARTIFACT_URL")          # Claude-<hash>.zip
+        FHASH=${FNAME#Claude-}
+        FHASH=${FHASH%.*}                          # strip .zip / .dmg
+        DMG_URL="https://downloads.claude.ai/releases/darwin/universal/${LATEST}/Claude-${FHASH}.dmg"
+
+        echo "Filename hash: $FHASH"
+        echo "DMG URL: $DMG_URL"
+
+        echo "current=$CURRENT"   >> "$GITHUB_OUTPUT"
+        echo "latest=$LATEST"     >> "$GITHUB_OUTPUT"
+        echo "fhash=$FHASH"       >> "$GITHUB_OUTPUT"
+        echo "dmg_url=$DMG_URL"   >> "$GITHUB_OUTPUT"
+        if [ "$CURRENT" != "$LATEST" ]; then
+          echo "needs_update=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          echo "Already on the latest version."
+        fi
+
+    - name: Install Nix
+      if: steps.check.outputs.needs_update == 'true'
+      uses: DeterminateSystems/nix-installer-action@v14
+
+    - name: Setup Nix cache
+      if: steps.check.outputs.needs_update == 'true'
+      uses: DeterminateSystems/magic-nix-cache-action@v7
+
+    - name: Repin flake (version, filename hash, sha256)
+      if: steps.check.outputs.needs_update == 'true'
       run: |
-        # Update version in the nix file
-        sed -i 's/version = "[^"]*"/version = "${{ steps.check-version.outputs.new_version }}"/' pkgs/claude-desktop.nix
+        set -euo pipefail
+        LATEST="${{ steps.check.outputs.latest }}"
+        FHASH="${{ steps.check.outputs.fhash }}"
+        DMG_URL="${{ steps.check.outputs.dmg_url }}"
 
-        # Extract the DMG filename hash from the download URL
-        # URL format: .../Claude-{hash}.dmg
-        DMG_FILENAME=$(basename "${{ steps.check-version.outputs.dmg_url }}")
-        FILE_HASH=$(echo "$DMG_FILENAME" | sed 's/Claude-\(.*\)\.dmg/\1/')
-        echo "DMG filename hash: $FILE_HASH"
+        # SRI hash straight from the store prefetcher — no hex/base64 dance.
+        SRI=$(nix store prefetch-file --json "$DMG_URL" | jq -r '.hash')
+        echo "SRI: $SRI"
 
-        # Update only the filename hash in the URL (keep ${version} interpolation)
-        sed -i "s|/Claude-[^\"]*\.dmg\"|/Claude-${FILE_HASH}.dmg\"|" pkgs/claude-desktop.nix
+        sed -i "s/version = \"[^\"]*\"/version = \"${LATEST}\"/" pkgs/claude-desktop.nix
+        sed -i "s|/Claude-[^\"]*\.dmg\"|/Claude-${FHASH}.dmg\"|" pkgs/claude-desktop.nix
+        sed -i "s|hash = \"sha256-[^\"]*\"|hash = \"${SRI}\"|" pkgs/claude-desktop.nix
 
-        # Convert hex hash to SRI format for the content hash
-        NEW_HASH_B64=$(echo -n "${{ steps.download-hash.outputs.new_hash }}" | xxd -r -p | base64 -w 0)
-        sed -i "s|sha256-[^\"]*\"|sha256-${NEW_HASH_B64}\"|" pkgs/claude-desktop.nix
-
-        # Show the changes
-        echo "Updated nix file:"
+        echo "--- Repinned srcDmg ---"
         grep -A3 'srcDmg = fetchurl' pkgs/claude-desktop.nix
 
-    - name: Verify flake
-      if: steps.check-version.outputs.needs_update == 'true'
+    - name: Build (exercises patch verification)
+      if: steps.check.outputs.needs_update == 'true'
       run: |
-        nix flake check
+        # A real build is the gate: pkgs/claude-desktop.nix fails the build
+        # if any perl patch stops matching the new minified bundle, so a
+        # green build here means the patch set still applies to this version.
+        NIXPKGS_ALLOW_UNFREE=1 nix build .#claude-desktop --impure -L
 
     - name: Create Pull Request
-      if: steps.check-version.outputs.needs_update == 'true'
-      id: create-pr
+      if: steps.check.outputs.needs_update == 'true'
+      id: pr
       uses: peter-evans/create-pull-request@v6
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
         commit-message: |
-          feat: update Claude Desktop to version ${{ steps.check-version.outputs.new_version }}
+          feat: update Claude Desktop to version ${{ steps.check.outputs.latest }}
 
-          🤖 Automated update via GitHub Actions (Mac source)
-        title: 'Update Claude Desktop to version ${{ steps.check-version.outputs.new_version }}'
+          Automated update from RELEASES.json. Build (incl. patch verification) passed.
+        title: 'Update Claude Desktop to version ${{ steps.check.outputs.latest }}'
         body: |
           ## Summary
-          - Updates Claude Desktop from current version to ${{ steps.check-version.outputs.new_version }}
-          - SHA256 hash updated for new Mac DMG
-          - Flake check passed successfully
+          - Bumps Claude Desktop ${{ steps.check.outputs.current }} → ${{ steps.check.outputs.latest }}
+          - Version detected from Claude's macOS `RELEASES.json`
+          - DMG sha256 repinned via `nix store prefetch-file`
+          - `nix build .#claude-desktop` passed, so the patch set still applies to this version
 
-          🤖 This PR was created and auto-merged by GitHub Actions
-        branch: update-claude-desktop-${{ steps.check-version.outputs.new_version }}
+          🤖 Automated by the update-claude-desktop workflow.
+        branch: update-claude-desktop-${{ steps.check.outputs.latest }}
         delete-branch: true
 
-    - name: Auto-merge Pull Request
-      if: steps.create-pr.outputs.pull-request-number
-      run: gh pr merge ${{ steps.create-pr.outputs.pull-request-number }} --merge --delete-branch
+    - name: Enable auto-merge
+      if: steps.pr.outputs.pull-request-number
+      run: gh pr merge ${{ steps.pr.outputs.pull-request-number }} --merge --delete-branch
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

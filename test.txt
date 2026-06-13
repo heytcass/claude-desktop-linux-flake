@@ -1,3 +1,0 @@
-test
-GPG signing test with YubiKey
-Testing touch requirement
