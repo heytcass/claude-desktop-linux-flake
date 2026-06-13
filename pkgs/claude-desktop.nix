@@ -12,6 +12,7 @@
   wrapGAppsHook3,
   patchy-cnb,
   perl,
+  nodejs,
   glib-networking,
 }:
 let
@@ -36,6 +37,7 @@ stdenvNoCC.mkDerivation rec {
     imagemagick
     libicns
     perl
+    nodejs # used only to syntax-check the patched bundle (node --check)
   ];
 
   desktopItem = makeDesktopItem {
@@ -163,11 +165,6 @@ stdenvNoCC.mkDerivation rec {
       echo "Patching DBus cleanup delay..."
       perl -i -pe 's{(\w+)&&\(\1\.destroy\(\),\1=null\)}{$1&&(async()=>{$1.destroy(),$1=null,await new Promise(r=>setTimeout(r,250))})()}g' "$INDEX_FILE"
 
-      # 4. Window blur before hide
-      # Fixes quick-submit focus issues on Linux
-      echo "Patching window blur before hide..."
-      perl -i -pe 's{(\w+)\.hide\(\)}{$1.blur(),$1.hide()}g' "$INDEX_FILE"
-
       echo "Linux tray stability patches applied"
     else
       echo "Warning: index.js not found for Claude Code patch"
@@ -255,8 +252,18 @@ stdenvNoCC.mkDerivation rec {
     verify_patch "DBus cleanup delay" \
       "$INDEX_FILE" 'setTimeout(r,250)'
 
-    verify_patch "Window blur before hide" \
-      "$INDEX_FILE" '.blur(),'
+    # Marker greps only prove a substring is present, not that the patched
+    # bundle still parses — a regex that drifts can inject a substring and
+    # still leave syntactically broken JS (e.g. a stray comma turning an
+    # initializer into a second declarator). A real parse check is the only
+    # thing that catches that class of regression, so gate on node --check.
+    echo "Syntax-checking patched main bundle..."
+    if node --check "$INDEX_FILE"; then
+      echo "  OK: index.js parses"
+    else
+      echo "  FAIL: patched index.js is not valid JavaScript"
+      VERIFY_FAILED=1
+    fi
 
     if [ "$VERIFY_FAILED" -ne 0 ]; then
       echo ""
