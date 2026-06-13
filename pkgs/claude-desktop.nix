@@ -288,16 +288,39 @@ stdenvNoCC.mkDerivation rec {
     install -Dm0644 {${desktopItem},$out}/share/applications/Claude.desktop
 
     # Create wrapper
-    # NOTE: Global shortcuts (Ctrl+Alt+Space) don't work in native Wayland mode
-    # due to Electron/Chromium limitations. We default to X11/XWayland for compatibility.
-    # Set CLAUDE_USE_WAYLAND=1 to force native Wayland (shortcuts won't work).
+    #
+    # Default to native Wayland via Ozone. --ozone-platform-hint=auto auto-selects
+    # the backend: a Wayland session (WAYLAND_DISPLAY set) runs natively on Wayland,
+    # otherwise it falls back to X11 — so this is safe on both session types.
+    #
+    # Global shortcuts (Quick Entry's Ctrl+Alt+Space) route through the XDG
+    # GlobalShortcutsPortal under native Wayland. That requires xdg-desktop-portal
+    # with a GlobalShortcuts backend (GNOME 48+ / KDE Plasma); on GNOME a one-time
+    # permission dialog appears on first bind. On compositors whose portal has no
+    # GlobalShortcuts backend (e.g. wlroots) the feature is an inert no-op.
+    #
+    # Escape hatch: set CLAUDE_USE_X11=1 to force XWayland. That restores X11
+    # key-grab global shortcuts and the mature IME/HiDPI path for users whose
+    # compositor's portal misbehaves. --ozone-platform=x11 takes precedence over
+    # the hint, and the Wayland-only feature/IME flags below are inert under X11,
+    # so they are passed unconditionally.
+    #
+    # Flag notes (Electron 35.5 / Chromium 134): UseOzonePlatform was removed in
+    # Chromium 98 (dropped); WaylandWindowDecorations is default-on (kept for
+    # explicitness); GlobalShortcutsPortal is a real, disabled-by-default feature
+    # that Electron 35's globalShortcut consumes.
     mkdir -p $out/bin
     makeWrapper ${electron}/bin/electron $out/bin/$pname \
       --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath [ glib-networking ]}" \
       --add-flags "$out/lib/$pname/app.asar" \
-      --add-flags "\''${CLAUDE_USE_WAYLAND:+--ozone-platform-hint=auto --enable-features=WaylandWindowDecorations,UseOzonePlatform --gtk-version=4}" \
+      --add-flags "--class=Claude" \
+      --add-flags "--ozone-platform-hint=auto" \
+      --add-flags "--enable-features=GlobalShortcutsPortal,WaylandWindowDecorations" \
+      --add-flags "--enable-wayland-ime" \
+      --add-flags "--wayland-text-input-version=3" \
+      --add-flags "\''${CLAUDE_USE_X11:+--ozone-platform=x11}" \
       --set GIO_EXTRA_MODULES "${glib-networking}/lib/gio/modules" \
-      --set-default GDK_BACKEND "x11" \
+      --set-default GTK_USE_PORTAL "1" \
       --set CHROME_DESKTOP "Claude.desktop" \
       --set-default GTK_THEME "\''${GTK_THEME:-Adwaita:dark}" \
       --set-default COLOR_SCHEME_PREFERENCE "\''${COLOR_SCHEME_PREFERENCE:-dark}" \
