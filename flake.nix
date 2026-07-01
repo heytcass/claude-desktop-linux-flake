@@ -18,10 +18,7 @@
       };
     in {
       packages = rec {
-        patchy-cnb = pkgs.callPackage ./pkgs/patchy-cnb.nix {};
-        claude-desktop = pkgs.callPackage ./pkgs/claude-desktop.nix {
-          inherit patchy-cnb;
-        };
+        claude-desktop = pkgs.callPackage ./pkgs/claude-desktop.nix {};
         claude-desktop-with-fhs = pkgs.symlinkJoin {
           name = "claude-desktop-with-fhs";
           paths = [

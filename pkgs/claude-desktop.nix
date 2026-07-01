@@ -1,348 +1,196 @@
 {
   lib,
-  stdenvNoCC,
+  stdenv,
   fetchurl,
-  electron,
-  p7zip,
-  libicns,
-  asar,
-  imagemagick,
-  makeDesktopItem,
+  dpkg,
+  autoPatchelfHook,
   makeWrapper,
-  wrapGAppsHook3,
-  patchy-cnb,
-  perl,
-  nodejs,
-  glib-networking,
+  # Linked libraries (DT_NEEDED of claude-desktop / chrome_crashpad_handler /
+  # app.asar.unpacked native modules)
+  alsa-lib,
+  at-spi2-atk,
+  at-spi2-core,
+  atk,
+  cairo,
+  cups,
+  dbus,
+  expat,
+  gdk-pixbuf,
+  glib,
+  gtk3,
+  libcap_ng,
+  libdrm,
+  libgbm,
+  libseccomp,
+  libxkbcommon,
+  nspr,
+  nss,
+  pango,
+  systemd,
+  xorg,
+  # dlopen'd at runtime (not in DT_NEEDED)
+  libGL,
+  libnotify,
+  libpulseaudio,
+  libsecret,
+  pipewire,
 }:
 let
   pname = "claude-desktop";
-  version = "1.12603.1";
-  # Mac DMG source - actively updated, unlike Windows installer
-  # Version discovery: curl -s https://downloads.claude.ai/releases/darwin/universal/RELEASES.json
-  srcDmg = fetchurl {
-    url = "https://downloads.claude.ai/releases/darwin/universal/${version}/Claude-3df4fd263723119bc45f0af2d784afd5055e2ba9.dmg";
-    hash = "sha256-yiw07a2jfdb6RuUTIlPkjTEJtR/J/yw/JJph7g/CIrk=";
+  version = "1.17377.2";
+
+  # Official Anthropic apt repository for the native Linux build.
+  # Version discovery: fetch
+  #   ${aptRepo}/dists/stable/main/binary-amd64/Packages
+  # and read the last Package stanza's Version/Filename/SHA256 fields
+  # (one stanza per published version, oldest first; arm64 lives in
+  # binary-arm64). The SHA256 there is the deb's hash — convert with
+  # `nix hash convert --hash-algo sha256 <hex>`.
+  aptRepo = "https://downloads.claude.ai/claude-desktop/apt/stable";
+
+  srcs = {
+    x86_64-linux = fetchurl {
+      url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_amd64.deb";
+      hash = "sha256-7AjUGqeYjS06P19P/fONIHtBLmYmOfQNeiZbivriEqs=";
+    };
+    aarch64-linux = fetchurl {
+      url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_arm64.deb";
+      hash = "sha256-yeflb3qWvTYLgZjpVDV8c7wifht4yIp6BWVBU9ICWN0=";
+    };
   };
 in
-stdenvNoCC.mkDerivation rec {
+stdenv.mkDerivation {
   inherit pname version;
 
-  src = ./.;
+  src =
+    srcs.${stdenv.hostPlatform.system}
+      or (throw "claude-desktop: unsupported system ${stdenv.hostPlatform.system}");
 
   nativeBuildInputs = [
-    p7zip
-    asar
+    dpkg
+    autoPatchelfHook
     makeWrapper
-    imagemagick
-    libicns
-    perl
-    nodejs # used only to syntax-check the patched bundle (node --check)
   ];
 
-  desktopItem = makeDesktopItem {
-    name = "Claude";
-    exec = "claude-desktop %u";
-    icon = "claude";
-    type = "Application";
-    terminal = false;
-    desktopName = "Claude";
-    genericName = "Claude Desktop";
-    comment = "AI Assistant by Anthropic";
-    startupWMClass = "Claude";
-    startupNotify = true;
-    categories = [
-      "Office"
-      "Utility"
-      "Network"
-      "Chat"
-    ];
-    mimeTypes = [ "x-scheme-handler/claude" ];
-  };
+  buildInputs = [
+    alsa-lib
+    at-spi2-atk
+    at-spi2-core
+    atk
+    cairo
+    cups
+    dbus
+    expat
+    gdk-pixbuf
+    glib
+    gtk3
+    libcap_ng # bundled virtiofsd (Cowork VM sandbox)
+    libdrm
+    libgbm
+    libseccomp # bundled virtiofsd
+    libxkbcommon
+    nspr
+    nss
+    pango
+    (lib.getLib stdenv.cc.cc) # libstdc++ for node-pty's pty.node
+    (lib.getLib systemd) # libudev
+    xorg.libX11
+    xorg.libXcomposite
+    xorg.libXdamage
+    xorg.libXext
+    xorg.libXfixes
+    xorg.libXrandr
+    xorg.libXtst
+    xorg.libxcb
+  ];
 
-  buildPhase = ''
-    runHook preBuild
+  # Chromium/Electron dlopens these without them appearing in DT_NEEDED.
+  # libGL/libEGL back hardware GL (dlopened from inside bundled ANGLE, so
+  # appendRunpaths rather than runtimeDependencies — the latter only extends
+  # executables' rpaths, not libraries'). libsecret backs safeStorage
+  # (keyring), libnotify backs notifications, pipewire backs Wayland screen
+  # sharing.
+  appendRunpaths = map (p: "${lib.getLib p}/lib") [
+    libGL
+    libnotify
+    libpulseaudio
+    libsecret
+    pipewire
+    systemd
+  ];
 
-    # Create temp working directory
-    mkdir -p $TMPDIR/build
-    cd $TMPDIR/build
-
-    # Extract Mac DMG (7z handles HFS+ despite warnings)
-    echo "Extracting Mac DMG..."
-    7z x -y ${srcDmg} || true
-
-    # Verify extraction worked
-    if [ ! -d "Claude/Claude.app" ]; then
-      echo "ERROR: Failed to extract Claude.app from DMG"
-      ls -la
-      exit 1
-    fi
-
-    APP_CONTENTS="$TMPDIR/build/Claude/Claude.app/Contents"
-    RESOURCES="$APP_CONTENTS/Resources"
-
-    echo "Extracted app contents:"
-    ls -la "$RESOURCES"
-
-    # Extract icons from electron.icns
-    echo "Extracting icons from electron.icns..."
-    icns2png -x "$RESOURCES/electron.icns"
-
-    for size in 16 32 48 128 256 512; do
-      mkdir -p $TMPDIR/build/icons/hicolor/"$size"x"$size"/apps
-      if [ -f "electron_"$size"x"$size"x32.png" ]; then
-        install -Dm 644 "electron_"$size"x"$size"x32.png" \
-          $TMPDIR/build/icons/hicolor/"$size"x"$size"/apps/claude.png
-      elif [ -f "electron_"$size"x"$size".png" ]; then
-        install -Dm 644 "electron_"$size"x"$size".png" \
-          $TMPDIR/build/icons/hicolor/"$size"x"$size"/apps/claude.png
-      fi
-    done
-
-    # Process app.asar files
-    mkdir -p electron-app
-    cp "$RESOURCES/app.asar" electron-app/
-    cp -r "$RESOURCES/app.asar.unpacked" electron-app/
-
-    cd electron-app
-    asar extract app.asar app.asar.contents
-
-    # Title bar patch - check if needed for Mac source
-    SEARCH_BASE="app.asar.contents/.vite/renderer/main_window/assets"
-    TARGET_PATTERN="MainWindowPage-*.js"
-
-    echo "Searching for '$TARGET_PATTERN' within '$SEARCH_BASE'..."
-    TARGET_FILES=$(find "$SEARCH_BASE" -type f -name "$TARGET_PATTERN" 2>/dev/null || true)
-    NUM_FILES=$(echo "$TARGET_FILES" | grep -c . || echo 0)
-
-    if [ "$NUM_FILES" -gt 0 ]; then
-      echo "Found $NUM_FILES matching files for title bar patch"
-      TARGET_FILE=$(echo "$TARGET_FILES" | head -1)
-      echo "Patching: $TARGET_FILE"
-
-      # Apply title bar patch
-      perl -i -pe 's{if\(!(\w+)\s*&&\s*(\w+)\)}{if($1 && $2)}g' "$TARGET_FILE"
-      echo "Title bar patch applied"
-    else
-      echo "No MainWindowPage files found - title bar patch may not be needed"
-    fi
-
-    # Claude Code platform patch - add Linux support
-    echo "Patching Claude Code platform detection for Linux..."
-    INDEX_FILE="app.asar.contents/.vite/build/index.js"
-    if [ -f "$INDEX_FILE" ]; then
-      # Add Linux platform support to getPlatform() function
-      # v1.1.3770+: now has arm64 ternary before throw
-      # Match both old (return"win32-x64";throw) and new (return...?"win32-arm64":"win32-x64";throw)
-      perl -i -pe 's{("win32-x64";)(throw)}{$1if(process.platform==="linux")return"linux-x64";$2}g' "$INDEX_FILE"
-      echo "Claude Code platform patch applied"
-
-      # Origin validation patch - allow file:// protocol when not packaged
-      # The app checks isPackaged===true for file:// URLs, but Nix runs with isPackaged=false
-      # Original: e.protocol==="file:"&&he.app.isPackaged===!0
-      # Patched:  e.protocol==="file:"
-      echo "Patching origin validation for file:// protocol..."
-      perl -i -pe 's{e\.protocol==="file:"&&\w+\.app\.isPackaged===!0}{e.protocol==="file:"}g' "$INDEX_FILE"
-      echo "Origin validation patch applied"
-
-      # Linux tray stability patches (from claude-desktop-debian)
-      # These fix common issues with system tray on Linux
-
-      # 1. Theme-aware tray icon selection
-      # macOS auto-inverts template icons; Linux needs explicit light/dark selection
-      # Patch: Use shouldUseDarkColors to pick the right icon variant
-      echo "Patching tray icon theme detection..."
-      perl -i -pe 's{:(\w)="TrayIconTemplate\.png"}{:$1=require("electron").nativeTheme.shouldUseDarkColors?"TrayIconTemplate-Dark.png":"TrayIconTemplate.png"}g' "$INDEX_FILE"
-
-      # 2. Tray recreation concurrency guard (1500ms throttle)
-      # Prevents rapid tray recreation that can crash on Linux
-      # Match by semantic signature: the only no-arg function starting with isReady() guard
-      echo "Patching tray recreation debouncing..."
-      perl -i -pe 's{(function \w+\(\)\{if\(![\w\$]+\.app\.isReady\(\)\)return;)}{$1if(global.__trayLock)return;global.__trayLock=true;setTimeout(()=>global.__trayLock=false,1500);}g' "$INDEX_FILE"
-
-      # 3. DBus cleanup delay (250ms)
-      # Allow proper StatusNotifierItem unregistration before recreation
-      echo "Patching DBus cleanup delay..."
-      perl -i -pe 's{(\w+)&&\(\1\.destroy\(\),\1=null\)}{$1&&(async()=>{$1.destroy(),$1=null,await new Promise(r=>setTimeout(r,250))})()}g' "$INDEX_FILE"
-
-      echo "Linux tray stability patches applied"
-    else
-      echo "Warning: index.js not found for Claude Code patch"
-    fi
-
-    # Replace native bindings - Mac uses @ant/claude-native path
-    echo "Replacing native bindings..."
-    mkdir -p app.asar.contents/node_modules/@ant/claude-native
-    mkdir -p app.asar.unpacked/node_modules/@ant/claude-native
-    cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.contents/node_modules/@ant/claude-native/claude-native-binding.node
-    cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.unpacked/node_modules/@ant/claude-native/claude-native-binding.node
-
-    # Create stub for @ant/claude-swift (Swift addon not available on Linux)
-    echo "Creating Swift addon stubs..."
-    mkdir -p app.asar.contents/node_modules/@ant/claude-swift/build/Release
-    mkdir -p app.asar.unpacked/node_modules/@ant/claude-swift/build/Release
-    # Use patchy-cnb as a stub for now - it will provide empty implementations
-    cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.contents/node_modules/@ant/claude-swift/build/Release/swift_addon.node
-    cp ${patchy-cnb}/lib/patchy-cnb.*.node app.asar.unpacked/node_modules/@ant/claude-swift/build/Release/swift_addon.node
-
-    # Copy tray icons and fix for Linux compatibility
-    # On macOS, "Template" icons are semi-transparent and auto-inverted by the OS
-    # Linux doesn't support this, so we need to:
-    # 1. Copy both light and dark variants
-    # 2. Make icons fully opaque (macOS templates are semi-transparent)
-    # 3. Patch JS to dynamically select based on theme
-    mkdir -p app.asar.contents/resources
-
-    # Copy all tray icon variants
-    cp "$RESOURCES"/TrayIconTemplate.png app.asar.contents/resources/ || true
-    cp "$RESOURCES"/TrayIconTemplate@2x.png app.asar.contents/resources/ || true
-    cp "$RESOURCES"/TrayIconTemplate@3x.png app.asar.contents/resources/ || true
-    cp "$RESOURCES"/TrayIconTemplate-Dark.png app.asar.contents/resources/ || true
-    cp "$RESOURCES"/TrayIconTemplate-Dark@2x.png app.asar.contents/resources/ || true
-    cp "$RESOURCES"/TrayIconTemplate-Dark@3x.png app.asar.contents/resources/ || true
-    cp "$RESOURCES"/Tray*.ico app.asar.contents/resources/ || true
-
-    # Fix icon opacity - macOS template icons are semi-transparent for auto-inversion
-    # Linux panels need fully opaque icons to be visible
-    echo "Fixing tray icon opacity for Linux..."
-    for icon in app.asar.contents/resources/TrayIconTemplate*.png; do
-      if [ -f "$icon" ]; then
-        convert "$icon" -channel A -fx "a>0?1:0" "$icon" || true
-      fi
-    done
-
-    # Copy i18n json files
-    mkdir -p app.asar.contents/resources/i18n
-    cp "$RESOURCES"/*.json app.asar.contents/resources/i18n/ || true
-
-    # Repackage app.asar
-    asar pack app.asar.contents app.asar
-
-    # ========================================================================
-    # Build-time patch verification
-    # ========================================================================
-    # Verify all patches applied by checking for marker strings in the
-    # patched source. Catches regex drift from minifier changes before
-    # the broken build reaches users.
-    echo "Verifying patches..."
-    VERIFY_FAILED=0
-
-    verify_patch() {
-      local name="$1" file="$2" marker="$3"
-      if grep -q "$marker" "$file"; then
-        echo "  OK: $name"
-      else
-        echo "  FAIL: $name — marker not found: $marker"
-        VERIFY_FAILED=1
-      fi
-    }
-
-    verify_patch "Platform detection (Linux)" \
-      "$INDEX_FILE" 'process.platform==="linux"'
-
-    verify_patch "Origin validation (file://)" \
-      "$INDEX_FILE" 'e.protocol==="file:"'
-
-    verify_patch "Tray icon theme detection" \
-      "$INDEX_FILE" 'shouldUseDarkColors'
-
-    verify_patch "Tray recreation debounce guard" \
-      "$INDEX_FILE" 'global.__trayLock'
-
-    verify_patch "DBus cleanup delay" \
-      "$INDEX_FILE" 'setTimeout(r,250)'
-
-    # Marker greps only prove a substring is present, not that the patched
-    # bundle still parses — a regex that drifts can inject a substring and
-    # still leave syntactically broken JS (e.g. a stray comma turning an
-    # initializer into a second declarator). A real parse check is the only
-    # thing that catches that class of regression, so gate on node --check.
-    echo "Syntax-checking patched main bundle..."
-    if node --check "$INDEX_FILE"; then
-      echo "  OK: index.js parses"
-    else
-      echo "  FAIL: patched index.js is not valid JavaScript"
-      VERIFY_FAILED=1
-    fi
-
-    if [ "$VERIFY_FAILED" -ne 0 ]; then
-      echo ""
-      echo "ERROR: One or more patches failed to apply."
-      echo "The upstream minified JS likely changed structure."
-      echo "Check the perl regex patterns against the current index.js."
-      exit 1
-    fi
-
-    echo "All patches verified."
-
-    runHook postBuild
+  unpackPhase = ''
+    runHook preUnpack
+    # Not `dpkg-deb -x`: that preserves the SUID bit on chrome-sandbox,
+    # which the sandboxed builder isn't allowed to set.
+    mkdir unpacked
+    dpkg-deb --fsys-tarfile $src \
+      | tar -x -C unpacked --no-same-owner --no-same-permissions
+    runHook postUnpack
   '';
+  sourceRoot = "unpacked";
+
+  dontConfigure = true;
+  dontBuild = true;
+  # Keep upstream binaries byte-identical apart from rpath patching; stripping
+  # a ~200 MB Chromium binary is slow and buys nothing here.
+  dontStrip = true;
 
   installPhase = ''
     runHook preInstall
 
-    # Electron directory structure
-    mkdir -p $out/lib/$pname
-    cp -r $TMPDIR/build/electron-app/app.asar $out/lib/$pname/
-    cp -r $TMPDIR/build/electron-app/app.asar.unpacked $out/lib/$pname/
+    mkdir -p $out
+    cp -r usr/lib usr/share $out/
+    rm -rf $out/share/lintian
 
-    # Install icons
-    mkdir -p $out/share/icons
-    cp -r $TMPDIR/build/icons/* $out/share/icons
+    # Drop the SUID sandbox helper: the Nix store can't carry SUID bits, and
+    # a present-but-not-SUID helper makes Chromium abort with a FATAL when it
+    # can't use user namespaces. On NixOS unprivileged userns is enabled, so
+    # Chromium uses the userns sandbox and never needs the helper. On distros
+    # that restrict unconfined userns (Ubuntu 24.04+), an AppArmor allowlist
+    # profile is required — see README "Sandboxing on non-NixOS".
+    rm $out/lib/${pname}/chrome-sandbox
 
-    # Install .desktop file
-    mkdir -p $out/share/applications
-    install -Dm0644 {${desktopItem},$out}/share/applications/Claude.desktop
+    # Upstream desktop file has Exec=claude-desktop (PATH-relative, including
+    # the NewChat/NewCode actions); point every Exec at the wrapper so it
+    # also works when the package isn't in PATH (e.g. `nix run`).
+    substituteInPlace $out/share/applications/claude-desktop.desktop \
+      --replace-fail "Exec=claude-desktop" "Exec=$out/bin/claude-desktop"
 
-    # Create wrapper
-    #
-    # Default to native Wayland via Ozone. --ozone-platform-hint=auto auto-selects
-    # the backend: a Wayland session (WAYLAND_DISPLAY set) runs natively on Wayland,
-    # otherwise it falls back to X11 — so this is safe on both session types.
+    # Default to native Wayland via Ozone. --ozone-platform-hint=auto
+    # auto-selects the backend: a Wayland session (WAYLAND_DISPLAY set) runs
+    # natively on Wayland, otherwise it falls back to X11.
     #
     # Global shortcuts (Quick Entry's Ctrl+Alt+Space) route through the XDG
-    # GlobalShortcutsPortal under native Wayland. That requires xdg-desktop-portal
-    # with a GlobalShortcuts backend (GNOME 48+ / KDE Plasma); on GNOME a one-time
-    # permission dialog appears on first bind. On compositors whose portal has no
-    # GlobalShortcuts backend (e.g. wlroots) the feature is an inert no-op.
+    # GlobalShortcutsPortal under native Wayland — needs xdg-desktop-portal
+    # with a GlobalShortcuts backend (GNOME 48+ / KDE Plasma); a no-op on
+    # portals without one (e.g. most wlroots compositors).
     #
-    # Escape hatch: set CLAUDE_USE_X11=1 to force XWayland. That restores X11
-    # key-grab global shortcuts and the mature IME/HiDPI path for users whose
-    # compositor's portal misbehaves. --ozone-platform=x11 takes precedence over
-    # the hint, and the Wayland-only feature/IME flags below are inert under X11,
-    # so they are passed unconditionally.
-    #
-    # Flag notes (Electron 35.5 / Chromium 134): UseOzonePlatform was removed in
-    # Chromium 98 (dropped); WaylandWindowDecorations is default-on (kept for
-    # explicitness); GlobalShortcutsPortal is a real, disabled-by-default feature
-    # that Electron 35's globalShortcut consumes.
+    # Escape hatch: CLAUDE_USE_X11=1 forces XWayland (--ozone-platform=x11
+    # takes precedence over the hint; the Wayland-only flags are inert under
+    # X11, so they're passed unconditionally).
     mkdir -p $out/bin
-    makeWrapper ${electron}/bin/electron $out/bin/$pname \
-      --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath [ glib-networking ]}" \
-      --add-flags "$out/lib/$pname/app.asar" \
-      --add-flags "--class=Claude" \
+    makeWrapper $out/lib/${pname}/${pname} $out/bin/${pname} \
       --add-flags "--ozone-platform-hint=auto" \
       --add-flags "--enable-features=GlobalShortcutsPortal,WaylandWindowDecorations" \
       --add-flags "--enable-wayland-ime" \
       --add-flags "--wayland-text-input-version=3" \
       --add-flags "\''${CLAUDE_USE_X11:+--ozone-platform=x11}" \
-      --set GIO_EXTRA_MODULES "${glib-networking}/lib/gio/modules" \
       --set-default GTK_USE_PORTAL "1" \
-      --set CHROME_DESKTOP "Claude.desktop" \
-      --set-default GTK_THEME "\''${GTK_THEME:-Adwaita:dark}" \
-      --set-default COLOR_SCHEME_PREFERENCE "\''${COLOR_SCHEME_PREFERENCE:-dark}" \
+      --set CHROME_DESKTOP "claude-desktop.desktop" \
       --prefix XDG_DATA_DIRS : "$out/share"
 
     runHook postInstall
   '';
 
-  dontUnpack = true;
-  dontConfigure = true;
-
   meta = with lib; {
-    description = "Claude Desktop for Linux";
+    description = "Claude Desktop for Linux (official native build, repackaged from the Anthropic apt repository)";
+    homepage = "https://claude.ai";
     license = licenses.unfree;
-    platforms = platforms.unix;
+    platforms = [
+      "x86_64-linux"
+      "aarch64-linux"
+    ];
     sourceProvenance = with sourceTypes; [ binaryNativeCode ];
     mainProgram = pname;
   };

@@ -1,20 +1,14 @@
-***THIS IS AN UNOFFICIAL BUILD SCRIPT!***
+***THIS IS AN UNOFFICIAL PACKAGE!***
 
-If you run into an issue with this build script, make an issue here. Don't bug Anthropic about it - they already have enough on their plates.
+If you run into an issue with this flake, make an issue here. Don't bug Anthropic about it - they already have enough on their plates.
 
 # Claude Desktop for Linux (Nix)
 
-Supports MCP!
-![image](https://github.com/user-attachments/assets/93080028-6f71-48bd-8e59-5149d148cd45)
+A Nix flake packaging **Anthropic's official native Linux build** of Claude Desktop, straight from their apt repository, with proper NixOS/GNOME/Wayland desktop integration.
 
-Supports the Ctrl+Alt+Space popup! (natively on Wayland via the XDG global-shortcuts portal on GNOME 48+/KDE — see [Display backend & global shortcuts](#display-backend--global-shortcuts))
-![image](https://github.com/user-attachments/assets/1deb4604-4c06-4e4b-b63f-7f6ef9ef28c1)
+> **History:** before July 2026 there was no official Linux release, and this flake worked by repackaging the macOS build with stub native bindings (`patchy-cnb`) and a stack of JS patches. Anthropic now ships a real Linux build (deb, amd64 + arm64) with native bindings, `node-pty` for Claude Code, and even the Cowork VM tooling — so all of that machinery is gone. This is now a straightforward deb repackage: extract, patch ELF rpaths for Nix, wrap.
 
-Supports the Tray menu! (Screenshot of running on KDE)
-
-![image](https://github.com/user-attachments/assets/ba209824-8afb-437c-a944-b53fd9ecd559)
-
-This is a Nix flake for running Claude Desktop on Linux with proper desktop integration.
+Supports MCP, the Ctrl+Alt+Space Quick Entry popup (natively on Wayland via the XDG global-shortcuts portal on GNOME 48+/KDE), the tray menu, and Claude Code.
 
 # Usage
 
@@ -46,16 +40,23 @@ If you would like to run [MCP servers with Claude Desktop](https://modelcontextp
 inputs.claude-desktop.packages.${system}.claude-desktop-with-fhs
 ```
 
-## GNOME Desktop Integration
+Both `x86_64-linux` and `aarch64-linux` are supported — upstream publishes amd64 and arm64 debs.
 
-This flake includes comprehensive fixes for proper GNOME desktop integration, particularly on Wayland:
+> **Upgrading from the pre-native-build flake:** the desktop file is now upstream's `claude-desktop.desktop` (window class `claude-desktop`) instead of this flake's old `Claude.desktop`. If you had Claude pinned to your dock, re-pin it once after upgrading.
 
-- **Correct Icon Display**: Shows the proper orange Claude sunburst icon instead of a generic gear icon
-- **Dock Icon Grouping**: Running applications properly group with pinned dock icons (no duplicate icons)
-- **Wayland Compatibility**: Proper window class and desktop file association for GNOME on Wayland
-- **FHS + Desktop Integration**: The `claude-desktop-with-fhs` package includes both MCP server support AND desktop files
+## How it works
 
-The integration has been thoroughly tested on GNOME 48 with Wayland and works reliably across different installation methods.
+Anthropic publishes the Linux build to an apt repository at
+`https://downloads.claude.ai/claude-desktop/apt/stable`. This flake:
+
+1. Fetches the versioned deb from the apt pool (hash-pinned from the repo's signed `Packages` index)
+2. Extracts it and patches ELF interpreter/rpaths with `autoPatchelfHook` so every binary — the Electron app, `chrome_crashpad_handler`, the bundled `virtiofsd`, and the native Node modules (`@ant/claude-native`, `node-pty`) — finds its libraries in the Nix store
+3. Ships upstream's own desktop file and hicolor icons, with `Exec` pointed at the wrapper
+4. Wraps the binary with Wayland-friendly Chromium flags (see below)
+
+The deb's Debian maintainer scripts (AppArmor profile, apt source registration) are intentionally not replicated — they don't apply on NixOS.
+
+Updates are automated: the weekly `update-claude-desktop` workflow reads the apt `Packages` index, repins version + per-arch hashes, and opens an auto-merging PR gated on a real `nix build`.
 
 ## Display backend & global shortcuts
 
@@ -83,67 +84,61 @@ mature IME/HiDPI rendering path.
 | --- | --- | --- |
 | `CLAUDE_USE_X11` | unset | Set to `1` to force XWayland (`--ozone-platform=x11`) instead of native Wayland. |
 | `GTK_USE_PORTAL` | `1` | Use the XDG portal for native file dialogs. Set to `0` to use Electron's built-in GTK dialogs. |
-| `GTK_THEME` | `Adwaita:dark` | Passed through to the app; override to change theming. |
-| `COLOR_SCHEME_PREFERENCE` | `dark` | Light/dark preference hint. |
+
+## Sandboxing on non-NixOS
+
+The Nix store can't carry SUID binaries, so the package removes Chromium's
+`chrome-sandbox` helper and relies on the **user-namespace sandbox** instead.
+
+- **NixOS**: unprivileged user namespaces are enabled by default — everything just works.
+- **Ubuntu 24.04+ (and other AppArmor-restricted distros)**: unconfined binaries
+  can't create user namespaces (`kernel.apparmor_restrict_unprivileged_userns=1`),
+  so the app aborts at startup. Allowlist it the same way the official deb's
+  postinst does — as root, create `/etc/apparmor.d/claude-desktop-nix`:
+
+  ```
+  abi <abi/4.0>,
+  include <tunables/global>
+
+  profile claude-desktop-nix /nix/store/*-claude-desktop-*/lib/claude-desktop/claude-desktop flags=(unconfined) {
+    userns,
+
+    include if exists <local/claude-desktop-nix>
+  }
+  ```
+
+  then load it with `sudo apparmor_parser -r /etc/apparmor.d/claude-desktop-nix`.
+  The glob keeps working across Nix store path changes. (`flags=(unconfined)`
+  does not confine the app — it only allowlists it for userns creation.)
+
+Do **not** run with `--no-sandbox` outside of throwaway testing.
+
+## GPU acceleration on non-NixOS
+
+On NixOS, hardware GL resolves through `/run/opengl-driver` automatically. On
+other distros that path doesn't exist, so Chromium logs EGL errors at startup
+and falls back to software rendering — functional, just not accelerated. Use
+[nixGL](https://github.com/nix-community/nixGL) (`nixGL claude-desktop`) for
+hardware acceleration on non-NixOS hosts.
 
 ## Other distributions
 
-This repository only provides a Nix flake, and does not provide a package for e.g. Ubuntu, Fedora, or Arch Linux.
+This repository only provides a Nix flake. On other distros you can simply install
+Anthropic's official deb, or see:
 
-Other known variants:
-- https://github.com/aaddrick/claude-desktop-debian - A debian builder for Claude Desktop
+- https://github.com/aaddrick/claude-desktop-debian - A debian builder for Claude Desktop (predates the official deb)
 - https://aur.archlinux.org/packages/claude-desktop-bin - An Arch package for Claude Desktop
-- https://github.com/wankdanker/claude-desktop-linux-bash - A bash-based Claude Desktop builder that works on Ubuntu and possibly other Debian derivatives
-
-If anyone else packages Claude Desktop for other distributions, make an issue or PR and I'll link it here.
-
-# How it works
-
-Claude Desktop is an Electron application. That means the majority of the application is inside an `app.asar` archive, which usually contains minified Javascript, HTML, and CSS, along with images and a few other things.
-
-Despite there being no official Linux Claude Desktop release, the vast majority of the code is completely cross-platform.
-
-With the exception of one library.
-
-## `claude-native-bindings`
-
-![image](https://github.com/user-attachments/assets/9b386f42-2565-441a-a351-9c09347f9f5f)
-
-Node, and by extension Electron, allow you to import natively-compiled objects into the Node runtime as if they were regular modules.
-These are typically used to extend the functionality in ways Node itself can't do. Only problem, as shown above, is that these objects 
-are only compiled for one OS. 
-
-Luckily enough, because it's a loadable Node module, that means you can open it up yourself in node and inspect it - no decompilation or disassembly needed:
-
-![image](https://github.com/user-attachments/assets/b2f1e72c-f763-45c0-8631-2de5555ae653)
-
-There are many functions here for getting monitor/window information, as well as for controlling the mouse and keyboard.
-I'm not sure what exactly these are for - my best guess is something unreleased related to [Computer Use](https://docs.anthropic.com/en/docs/build-with-claude/computer-use),
-however I'm not a huge fan of this functionality existing in the first place.
-
-As for how to move forward with getting Claude Desktop working on Linux, seeing as how the API surface area of this module is relatively
-small, it looked fairly easy to just wholesale reimplement it, using stubs for the functionality.
-
-## `patchy-cnb`
-
-The result of that is a library I call `patchy-cnb`, which uses NAPI-RS to match the original API with stub functions.
-Turns out, the original module also used NAPI-RS. Neat!
-
-From there, it's just a matter of compiling `patchy-cnb`, repackaging the app.asar to include the newly built Linux module, and
-making a new Electron build with these files.
 
 # Known limitations
 
-This is a repackaging of a macOS build, and a few things either don't work or work differently than on macOS. Rather than pretend otherwise:
-
-- **`patchy-cnb` is a stub.** The Windows/macOS `claude-native` module is reimplemented as no-ops: window/monitor enumeration returns empty, and the mouse/keyboard control entry points do nothing. Anything that would drive **Computer Use**-style screen/input control through these native bindings is therefore inert. The normal chat app does not depend on them, so day-to-day use is unaffected.
-- **Cowork / local-agent native features are not wired up.** This flake does **not** vendor the Cowork daemon, bubblewrap/KVM sandbox backends, or `node-pty` that the [aaddrick/claude-desktop-debian](https://github.com/aaddrick/claude-desktop-debian) build ships. Features that depend on the Cowork VM service won't be available here. If you need those, that project (which also offers a Nix flake) is the more complete option today.
-- **In-app auto-update is intentionally disabled.** On Nix the store path is read-only, so the app can't update itself. Updates are this repo's job instead: the weekly `update-claude-desktop` workflow reads Claude's `RELEASES.json`, repins the flake, and opens an auto-merging PR once a real `nix build` (including patch verification) passes. Bump your flake input to get the new version.
+- **In-app auto-update is intentionally inert.** On Nix the store path is read-only, so the app can't update itself (on regular distros, updates flow through apt). Updates are this repo's job instead: the weekly `update-claude-desktop` workflow repins the flake from the apt index. Bump your flake input to get the new version.
+- **Cowork's VM sandbox needs host virtualization.** The deb Recommends `qemu-system-x86`, `ovmf`, and `virtiofsd` (a `virtiofsd` is bundled and patched, but qemu/OVMF must come from the host). Without them, Cowork VM features won't start.
 - **Native Wayland global shortcuts depend on your compositor's portal.** See [Display backend & global shortcuts](#display-backend--global-shortcuts) — they work on GNOME 48+/KDE but are a no-op on portals without a GlobalShortcuts backend; use `CLAUDE_USE_X11=1` there.
+- **Sandbox and GPU acceleration need one-time setup on non-NixOS hosts.** See the two sections above.
 
 # License
 
-The build scripts in this repository, as well as `patchy-cnb`, are dual-licensed under the terms of the MIT license and the Apache License (Version 2.0).
+The build scripts in this repository are dual-licensed under the terms of the MIT license and the Apache License (Version 2.0).
 
 See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE) for details.
 

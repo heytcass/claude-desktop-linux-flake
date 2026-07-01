@@ -1,9 +1,10 @@
 name: Update Claude Desktop
 
-# Reads the latest version straight from Claude's macOS RELEASES.json
-# (the same manifest the app's own auto-updater uses), repins the flake,
-# runs a real `nix build` so the patch-verification step actually gates
-# the update, then opens an auto-merging PR.
+# Reads the latest version from Anthropic's official apt repository Packages
+# index (the same metadata `apt upgrade` trusts), repins the flake's version
+# and per-arch deb hashes from the index's SHA256 fields, runs a real
+# `nix build` (which re-verifies the amd64 hash against the actual download),
+# then opens an auto-merging PR.
 
 on:
   schedule:
@@ -11,13 +12,16 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Force a specific version (optional; auto-detected from RELEASES.json otherwise)'
+        description: 'Force a specific version (optional; auto-detected from the apt Packages index otherwise)'
         required: false
         type: string
 
 permissions:
   contents: write
   pull-requests: write
+
+env:
+  APT_DIST: https://downloads.claude.ai/claude-desktop/apt/stable/dists/stable
 
 jobs:
   check-and-update:
@@ -36,45 +40,22 @@ jobs:
         CURRENT=$(grep -oP 'version = "\K[^"]+' pkgs/claude-desktop.nix | head -1)
         echo "Current version: $CURRENT"
 
-        RELEASES_URL="https://downloads.claude.ai/releases/darwin/universal/RELEASES.json"
-
         if [ -n "${{ inputs.version }}" ]; then
           LATEST="${{ inputs.version }}"
           echo "Forced version: $LATEST"
         else
-          LATEST=$(curl -fsSL "$RELEASES_URL" | jq -r '.currentRelease')
-          echo "Latest version (RELEASES.json): $LATEST"
+          LATEST=$(curl -fsSL "$APT_DIST/main/binary-amd64/Packages" \
+            | grep -oP '^Version: \K.*' | sort -V | tail -1)
+          echo "Latest version (apt Packages index): $LATEST"
         fi
 
-        if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
-          echo "::error::Could not read latest version from RELEASES.json"
+        if [ -z "$LATEST" ]; then
+          echo "::error::Could not read latest version from the apt Packages index"
           exit 1
         fi
 
-        # The release manifest points at a .zip; the flake fetches the .dmg
-        # at the same path. The per-release filename hash is shared between
-        # them, so derive it from whichever artifact the manifest lists.
-        ARTIFACT_URL=$(curl -fsSL "$RELEASES_URL" \
-          | jq -r --arg v "$LATEST" \
-            '.releases[] | select(.updateTo.version == $v) | .updateTo.url' \
-          | head -1)
-        # Fall back to the current release's url if the per-version lookup misses.
-        if [ -z "$ARTIFACT_URL" ] || [ "$ARTIFACT_URL" = "null" ]; then
-          ARTIFACT_URL=$(curl -fsSL "$RELEASES_URL" | jq -r '.releases[0].updateTo.url')
-        fi
-
-        FNAME=$(basename "$ARTIFACT_URL")          # Claude-<hash>.zip
-        FHASH=${FNAME#Claude-}
-        FHASH=${FHASH%.*}                          # strip .zip / .dmg
-        DMG_URL="https://downloads.claude.ai/releases/darwin/universal/${LATEST}/Claude-${FHASH}.dmg"
-
-        echo "Filename hash: $FHASH"
-        echo "DMG URL: $DMG_URL"
-
-        echo "current=$CURRENT"   >> "$GITHUB_OUTPUT"
-        echo "latest=$LATEST"     >> "$GITHUB_OUTPUT"
-        echo "fhash=$FHASH"       >> "$GITHUB_OUTPUT"
-        echo "dmg_url=$DMG_URL"   >> "$GITHUB_OUTPUT"
+        echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+        echo "latest=$LATEST"   >> "$GITHUB_OUTPUT"
         if [ "$CURRENT" != "$LATEST" ]; then
           echo "needs_update=true" >> "$GITHUB_OUTPUT"
         else
@@ -90,31 +71,56 @@ jobs:
       if: steps.check.outputs.needs_update == 'true'
       uses: DeterminateSystems/magic-nix-cache-action@v7
 
-    - name: Repin flake (version, filename hash, sha256)
+    - name: Repin flake (version + per-arch deb hashes)
       if: steps.check.outputs.needs_update == 'true'
       run: |
         set -euo pipefail
         LATEST="${{ steps.check.outputs.latest }}"
-        FHASH="${{ steps.check.outputs.fhash }}"
-        DMG_URL="${{ steps.check.outputs.dmg_url }}"
 
-        # SRI hash straight from the store prefetcher — no hex/base64 dance.
-        SRI=$(nix store prefetch-file --json "$DMG_URL" | jq -r '.hash')
-        echo "SRI: $SRI"
+        # Pull each arch's deb SHA256 from its Packages stanza and convert to
+        # SRI. The index is the same data apt itself trusts (signed InRelease);
+        # the amd64 hash is additionally verified by the nix build below when
+        # fetchurl downloads the real deb.
+        sha_for_arch() {
+          curl -fsSL "$APT_DIST/main/binary-$1/Packages" \
+            | awk -v ver="$LATEST" '
+                BEGIN { RS=""; FS="\n" }
+                {
+                  v=""; s=""
+                  for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^Version: /) v = substr($i, 10)
+                    if ($i ~ /^SHA256: /)  s = substr($i, 9)
+                  }
+                  if (v == ver) print s
+                }' \
+            | head -1
+        }
 
-        sed -i "s/version = \"[^\"]*\"/version = \"${LATEST}\"/" pkgs/claude-desktop.nix
-        sed -i "s|/Claude-[^\"]*\.dmg\"|/Claude-${FHASH}.dmg\"|" pkgs/claude-desktop.nix
-        sed -i "s|hash = \"sha256-[^\"]*\"|hash = \"${SRI}\"|" pkgs/claude-desktop.nix
+        for arch in amd64 arm64; do
+          SHA=$(sha_for_arch "$arch")
+          if [ -z "$SHA" ]; then
+            echo "::error::No $arch Packages stanza for version $LATEST"
+            exit 1
+          fi
+          SRI=$(nix hash convert --hash-algo sha256 --to sri "$SHA")
+          echo "$arch: $SRI"
+          # Each fetchurl's url line (…_<arch>.deb") is immediately followed
+          # by its hash line; scope the substitution to that line.
+          sed -i "/_$arch.deb\";/{n;s|hash = \"sha256-[^\"]*\"|hash = \"$SRI\"|}" \
+            pkgs/claude-desktop.nix
+        done
 
-        echo "--- Repinned srcDmg ---"
-        grep -A3 'srcDmg = fetchurl' pkgs/claude-desktop.nix
+        sed -i "s/version = \"[^\"]*\"/version = \"$LATEST\"/" pkgs/claude-desktop.nix
 
-    - name: Build (exercises patch verification)
+        echo "--- Repinned srcs ---"
+        grep -A9 'srcs = {' pkgs/claude-desktop.nix
+
+    - name: Build
       if: steps.check.outputs.needs_update == 'true'
       run: |
-        # A real build is the gate: pkgs/claude-desktop.nix fails the build
-        # if any perl patch stops matching the new minified bundle, so a
-        # green build here means the patch set still applies to this version.
+        # A real build is the gate: fetchurl re-verifies the amd64 deb hash
+        # against the actual download, and autoPatchelfHook fails the build
+        # if the new release grew a dependency we don't provide.
         NIXPKGS_ALLOW_UNFREE=1 nix build .#claude-desktop --impure -L
 
     - name: Create Pull Request
@@ -126,14 +132,14 @@ jobs:
         commit-message: |
           feat: update Claude Desktop to version ${{ steps.check.outputs.latest }}
 
-          Automated update from RELEASES.json. Build (incl. patch verification) passed.
+          Automated update from the Anthropic apt repository. Build passed.
         title: 'Update Claude Desktop to version ${{ steps.check.outputs.latest }}'
         body: |
           ## Summary
           - Bumps Claude Desktop ${{ steps.check.outputs.current }} → ${{ steps.check.outputs.latest }}
-          - Version detected from Claude's macOS `RELEASES.json`
-          - DMG sha256 repinned via `nix store prefetch-file`
-          - `nix build .#claude-desktop` passed, so the patch set still applies to this version
+          - Version detected from Anthropic's apt `Packages` index
+          - amd64 + arm64 deb hashes repinned from the index's SHA256 fields
+          - `nix build .#claude-desktop` passed (fetchurl re-verified the amd64 hash; autoPatchelf found all dependencies)
 
           🤖 Automated by the update-claude-desktop workflow.
         branch: update-claude-desktop-${{ steps.check.outputs.latest }}
