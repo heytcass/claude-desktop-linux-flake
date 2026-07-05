@@ -4,10 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an unofficial Nix flake that enables running Anthropic's Claude Desktop application on Linux by repackaging the Windows version. The project consists of two main components:
-
-1. **patchy-cnb** (in `/patchy-cnb/`): A Rust library that reimplements Windows-only native bindings as stubs
-2. **claude-desktop**: A Nix package that extracts the Windows installer and repackages it for Linux
+This is an unofficial Nix flake packaging Anthropic's **official native Linux build** of Claude Desktop (published as a deb to their apt repository since July 2026). The old approach — repackaging the macOS DMG with `patchy-cnb` stub bindings and JS patches — is gone; this is now a standard deb repackage.
 
 ## Key Commands
 
@@ -18,61 +15,39 @@ This is an unofficial Nix flake that enables running Anthropic's Claude Desktop 
 NIXPKGS_ALLOW_UNFREE=1 nix run github:k3d3/claude-desktop-linux-flake --impure
 
 # Build locally
-nix build .#claude-desktop
+NIXPKGS_ALLOW_UNFREE=1 nix build .#claude-desktop --impure
 
 # Build with FHS environment (for MCP support)
-nix build .#claude-desktop-with-fhs
-```
-
-### Developing patchy-cnb
-
-```bash
-cd patchy-cnb
-npm run build         # Build release version
-npm run build:debug   # Build debug version
-npm test             # Run tests
+NIXPKGS_ALLOW_UNFREE=1 nix build .#claude-desktop-with-fhs --impure
 ```
 
 ## Architecture
 
-The project works by:
+The package works by:
 
-1. Downloading Claude Desktop's Windows installer
-2. Extracting the Electron app contents
-3. Replacing Windows-specific `claude-native-bindings` with `patchy-cnb` stubs
-4. Patching the app to enable title bar on Linux
-5. Repackaging as a Linux Electron application
-6. Configuring proper desktop integration for GNOME/Wayland
+1. Fetching the versioned deb from Anthropic's apt pool at `https://downloads.claude.ai/claude-desktop/apt/stable` (per-arch: amd64 + arm64)
+2. Extracting it (via `dpkg-deb --fsys-tarfile | tar --no-same-permissions` — plain `dpkg-deb -x` fails in the sandbox on the SUID `chrome-sandbox`)
+3. Patching ELF rpaths with `autoPatchelfHook` (main binary, crashpad handler, bundled `virtiofsd`, `@ant/claude-native` and `node-pty` Node modules)
+4. Removing `chrome-sandbox` (can't be SUID in the store; the userns sandbox is used instead)
+5. Shipping upstream's desktop file (`claude-desktop.desktop`, window class `claude-desktop`) and hicolor icons, with `Exec` pointed at the wrapper
+6. Wrapping with Wayland-friendly Chromium flags (`--ozone-platform-hint=auto`, GlobalShortcutsPortal, Wayland IME; `CLAUDE_USE_X11=1` escape hatch)
 
 Key files:
 
-- `/pkgs/claude-desktop.nix`: Main Nix package definition with desktop integration
-- `/patchy-cnb/src/lib.rs`: Stub implementations of Windows native functions
-- `/flake.nix`: Nix flake configuration with FHS wrapper for MCP support
+- `/pkgs/claude-desktop.nix`: The package definition
+- `/flake.nix`: Flake outputs, including the FHS wrapper for MCP support
+- `/.github/workflows/update-claude-desktop.yml`: Weekly auto-update from the apt `Packages` index
 
-When updating for new Claude Desktop versions, modify the version and hash in `/pkgs/claude-desktop.nix`.
+### Updating for a new version
 
-## GNOME Desktop Integration
+CI does this automatically, but by hand: read the latest `Version`/`SHA256` per arch from
+`https://downloads.claude.ai/claude-desktop/apt/stable/dists/stable/main/binary-{amd64,arm64}/Packages`,
+convert hashes with `nix hash convert --hash-algo sha256 <hex>`, and update `version` plus both `hash` fields in `/pkgs/claude-desktop.nix`.
 
-This flake includes fixes for proper GNOME desktop integration:
+### Host caveats (see README for details)
 
-### Issues Fixed
-
-- **Dock Icon**: Claude now shows the correct orange sunburst icon instead of a generic gear icon
-- **Window Grouping**: Running applications properly group with pinned dock icons
-- **Wayland Support**: Proper window class and desktop file association on Wayland
-- **FHS Compatibility**: The `claude-desktop-with-fhs` package includes desktop files for MCP server support
-
-### Technical Details
-
-- Desktop file named `Claude.desktop` with `StartupWMClass=Claude` for proper window association
-- Icon references use `claude` to match installed PNG files in hicolor theme structure
-- FHS wrapper uses `symlinkJoin` to combine desktop integration with MCP environment
-- Environment variables set for optimal Wayland/Electron integration
-
-### Testing
-
-The integration has been thoroughly tested on GNOME 48 with Wayland and works reliably across different installation methods (local build, Home Manager, system packages).
+- Non-NixOS hosts with restricted userns (Ubuntu 24.04+) need an AppArmor allowlist profile for the sandbox.
+- Non-NixOS hosts fall back to software rendering unless wrapped with nixGL.
 
 ## MCP Server Setup
 
