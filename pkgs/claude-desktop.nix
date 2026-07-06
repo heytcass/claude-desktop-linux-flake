@@ -27,7 +27,14 @@
   nss,
   pango,
   systemd,
-  xorg,
+  libx11,
+  libxcomposite,
+  libxdamage,
+  libxext,
+  libxfixes,
+  libxrandr,
+  libxtst,
+  libxcb,
   # dlopen'd at runtime (not in DT_NEEDED)
   libGL,
   libnotify,
@@ -94,14 +101,14 @@ stdenv.mkDerivation {
     pango
     (lib.getLib stdenv.cc.cc) # libstdc++ for node-pty's pty.node
     (lib.getLib systemd) # libudev
-    xorg.libX11
-    xorg.libXcomposite
-    xorg.libXdamage
-    xorg.libXext
-    xorg.libXfixes
-    xorg.libXrandr
-    xorg.libXtst
-    xorg.libxcb
+    libx11
+    libxcomposite
+    libxdamage
+    libxext
+    libxfixes
+    libxrandr
+    libxtst
+    libxcb
   ];
 
   # Chromium/Electron dlopens these without them appearing in DT_NEEDED.
