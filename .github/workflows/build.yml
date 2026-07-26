@@ -8,25 +8,20 @@ name: Build
 # rename sat broken on main for two weeks: the bot correctly refused to open a
 # PR, and nothing else was watching.
 #
-# Note on branch protection: the build job is path-filtered, so a docs-only PR
-# never runs it. If you mark `build` as a required check, those PRs will block
-# forever waiting on a job that will never report. Either leave it unrequired or
-# add an always-run stub that satisfies the requirement.
+# Branch protection: mark **`Build gate`** as the required check, not `build`
+# or `hashes`.
+#
+# Path filtering deliberately lives on the jobs, not on `on:`. A filter at the
+# `on:` level skips the whole workflow on a docs-only PR, so a required check
+# inside it never reports and the PR blocks forever waiting on a job that will
+# never run. Instead the workflow always triggers, a `changes` job decides
+# whether the expensive work is needed, and `Build gate` always reports —
+# passing when the build legitimately did not need to run.
 
 on:
   pull_request:
-    paths:
-      - 'pkgs/**'
-      - 'flake.nix'
-      - 'flake.lock'
-      - '.github/workflows/build.yml'
   push:
     branches: [main]
-    paths:
-      - 'pkgs/**'
-      - 'flake.nix'
-      - 'flake.lock'
-      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 concurrency:
@@ -37,13 +32,82 @@ env:
   APT_DIST: https://downloads.claude.ai/claude-desktop/apt/stable/dists/stable
 
 jobs:
+  # Decides whether anything build-relevant changed. Done with git rather than a
+  # third-party paths-filter action to keep the dependency surface small.
+  changes:
+    name: Detect relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Diff against the base
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # A manual dispatch is always an explicit request to build.
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "workflow_dispatch — building unconditionally"
+            exit 0
+          fi
+
+          if [ "$EVENT" = "pull_request" ]; then
+            RANGE="$BASE...$HEAD"
+          else
+            # First push to a new branch reports an all-zero `before`; there is
+            # no usable range, so fall back to building.
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              echo "relevant=true" >> "$GITHUB_OUTPUT"
+              echo "no usable before-sha — building unconditionally"
+              exit 0
+            fi
+            RANGE="$BEFORE..$AFTER"
+          fi
+
+          # Fail open: if the range can't be resolved (force-push, shallow
+          # history), build rather than silently skip verification.
+          if ! CHANGED=$(git diff --name-only "$RANGE" 2>/dev/null); then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "could not diff $RANGE — building unconditionally"
+            exit 0
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED" | sed 's/^/  /'
+
+          if echo "$CHANGED" | grep -qE '^(pkgs/|flake\.nix$|flake\.lock$|\.github/workflows/build\.yml$)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "-> build-relevant changes found"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "-> nothing build-relevant; build and hashes will be skipped"
+          fi
+
   # Cheap (~5s, no Nix, no download): confirm both pinned hashes match the
   # signed apt Packages index. The arm64 deb is never downloaded by CI — the
   # x86_64 build below only re-verifies the amd64 hash — so without this an
   # arm64 typo or an arch-swapped repin ships silently and only breaks for
   # aarch64 users.
+  #
+  # Gated on `changes` despite being cheap: it asserts the pinned version still
+  # has a stanza in the index, so if upstream ever prunes old versions it would
+  # start failing on unrelated PRs. Scoping it to PRs that touch the pin bounds
+  # that false positive to changes you'd be reviewing anyway.
   hashes:
     name: Pinned hashes match apt index
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +156,8 @@ jobs:
 
   build:
     name: nix build (x86_64-linux)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,4 +230,46 @@ jobs:
           nix shell --inputs-from . nixpkgs#desktop-file-utils \
             -c desktop-file-validate "$desktopFile" || rc=1
 
+          exit $rc
+
+  # THIS is the job to mark required in branch protection.
+  #
+  # It runs on every PR regardless of what changed, so it always reports a
+  # status. `skipped` counts as passing — that is the whole point: a docs-only
+  # PR legitimately does not need a build, and must not be blocked waiting on
+  # one. Anything else (failure, cancelled) fails the gate.
+  gate:
+    name: Build gate
+    needs: [changes, hashes, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check upstream job results
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          HASHES: ${{ needs.hashes.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          set -euo pipefail
+          echo "changes=$CHANGES  hashes=$HASHES  build=$BUILD"
+          rc=0
+
+          # Change detection failing is itself a gate failure: without it we
+          # don't know whether the skips below were legitimate.
+          if [ "$CHANGES" != "success" ]; then
+            echo "::error::change detection did not succeed ($CHANGES)"
+            rc=1
+          fi
+
+          check() {
+            case "$2" in
+              success) echo "$1: passed" ;;
+              skipped) echo "$1: skipped (no build-relevant changes)" ;;
+              *)       echo "::error::$1 did not pass ($2)"; rc=1 ;;
+            esac
+          }
+          check hashes "$HASHES"
+          check build  "$BUILD"
+
+          [ $rc -eq 0 ] && echo "Gate passed." || echo "Gate failed."
           exit $rc
