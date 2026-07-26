@@ -37,6 +37,7 @@ Key files:
 - `/pkgs/claude-desktop.nix`: The package definition
 - `/flake.nix`: Flake outputs, including the FHS wrapper for MCP support
 - `/.github/workflows/update-claude-desktop.yml`: Weekly auto-update from the apt `Packages` index
+- `/.github/workflows/build.yml`: Build verification for hand-authored PRs — checks both arch hashes against the apt index, runs `nix build`, and asserts the packaging invariants (exactly one `.desktop` file, no unpatched `Exec=`, `CHROME_DESKTOP` matching it, no `chrome-sandbox`). `Build gate` is the job to mark required in branch protection; `build` and `hashes` skip on docs-only changes and would deadlock a required check
 
 ### Updating for a new version
 
