@@ -155,7 +155,13 @@ jobs:
             rc=1
           fi
 
-          nix shell nixpkgs#desktop-file-utils \
+          # --inputs-from . resolves nixpkgs from this flake's lock rather than
+          # the default registry. nix-installer-action repoints that registry
+          # at FlakeHub (nixpkgs-weekly), which would make this step depend on
+          # a third-party service — one that already errors intermittently in
+          # this repo's CI — and validate with a different nixpkgs than the one
+          # that built the package.
+          nix shell --inputs-from . nixpkgs#desktop-file-utils \
             -c desktop-file-validate "$desktopFile" || rc=1
 
           exit $rc
