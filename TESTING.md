@@ -13,15 +13,16 @@ These fail the build or the `update-claude-desktop` workflow if they regress:
 | Deb matches the apt index | `fetchurl` verifies the pinned SHA256 (repinned by CI from the signed apt `Packages` index) |
 | Every ELF's dependencies resolve | `autoPatchelfHook` fails the build on any unsatisfied `DT_NEEDED` (covers the main binary, crashpad, bundled virtiofsd, native Node modules) |
 | Package builds end to end | `nix build .#claude-desktop` (run by CI on every version bump) |
-| `claude://` is registered | upstream desktop file ships `MimeType=x-scheme-handler/claude`; `update-desktop-database` maps it to `claude-desktop.desktop` |
+| `claude://` is registered | upstream desktop file ships `MimeType=x-scheme-handler/claude`; `update-desktop-database` maps it to `com.anthropic.Claude.desktop` |
 | Desktop file is valid | `desktop-file-validate` (run manually below) |
+| Desktop file is found at all | the install phase globs `share/applications/*.desktop` and fails unless exactly one matches, so an upstream rename can't silently ship an unpatched `Exec=` |
 
 Quick local re-run:
 
 ```bash
 NIXPKGS_ALLOW_UNFREE=1 nix build .#claude-desktop --impure -L
 OUT=$(readlink -f result)
-nix shell nixpkgs#desktop-file-utils -c desktop-file-validate "$OUT"/share/applications/claude-desktop.desktop
+nix shell nixpkgs#desktop-file-utils -c desktop-file-validate "$OUT"/share/applications/*.desktop
 ```
 
 ## Manual matrix (run on the testbed)
