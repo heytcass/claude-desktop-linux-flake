@@ -44,7 +44,7 @@
 }:
 let
   pname = "claude-desktop";
-  version = "1.18286.0";
+  version = "1.24012.9";
 
   # Official Anthropic apt repository for the native Linux build.
   # Version discovery: fetch
@@ -58,11 +58,11 @@ let
   srcs = {
     x86_64-linux = fetchurl {
       url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_amd64.deb";
-      hash = "sha256-jzFK0agKq1JxGo6qvAaq5I+zQfCt6koNcmTbXKudBTY=";
+      hash = "sha256-MC5tII3YyOnlIGfaoo7zsRcaFhNYb9DhC+3GQiJbbuE=";
     };
     aarch64-linux = fetchurl {
       url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_arm64.deb";
-      hash = "sha256-SCC5iankMzlWtsvq7icy3StJkE+6VAtHKWPIADyAhsc=";
+      hash = "sha256-Gpvhd7BjNluS5SL+3RnIfa9uvJKp9xEhvf9ynifeQIw=";
     };
   };
 in
@@ -158,10 +158,27 @@ stdenv.mkDerivation {
     # profile is required — see README "Sandboxing on non-NixOS".
     rm $out/lib/${pname}/chrome-sandbox
 
-    # Upstream desktop file has Exec=claude-desktop (PATH-relative, including
-    # the NewChat/NewCode actions); point every Exec at the wrapper so it
-    # also works when the package isn't in PATH (e.g. `nix run`).
-    substituteInPlace $out/share/applications/claude-desktop.desktop \
+    # Resolve the desktop file rather than pinning its name: upstream renamed
+    # it claude-desktop.desktop -> com.anthropic.Claude.desktop in 1.20186.1,
+    # which hard-broke the build. Insist on exactly one match so an unexpected
+    # layout still fails loudly instead of silently shipping an unpatched (or
+    # missing) entry. nullglob so a zero-match glob is an empty array rather
+    # than the literal pattern.
+    shopt -s nullglob
+    desktopFiles=($out/share/applications/*.desktop)
+    shopt -u nullglob
+    if [ ''${#desktopFiles[@]} -ne 1 ]; then
+      echo "claude-desktop: expected exactly one .desktop file in" \
+           "share/applications, found ''${#desktopFiles[@]}: ''${desktopFiles[*]}" >&2
+      exit 1
+    fi
+    desktopFile="''${desktopFiles[0]}"
+    desktopName="$(basename "$desktopFile")"
+
+    # Every Exec= is PATH-relative (the main entry plus the NewChat/NewCode
+    # actions); point them all at the wrapper so launching also works when the
+    # package isn't in PATH (e.g. `nix run`).
+    substituteInPlace "$desktopFile" \
       --replace-fail "Exec=claude-desktop" "Exec=$out/bin/claude-desktop"
 
     # Default to native Wayland via Ozone. --ozone-platform-hint=auto
@@ -184,7 +201,7 @@ stdenv.mkDerivation {
       --add-flags "--wayland-text-input-version=3" \
       --add-flags "\''${CLAUDE_USE_X11:+--ozone-platform=x11}" \
       --set-default GTK_USE_PORTAL "1" \
-      --set CHROME_DESKTOP "claude-desktop.desktop" \
+      --set CHROME_DESKTOP "$desktopName" \
       --prefix XDG_DATA_DIRS : "$out/share"
 
     runHook postInstall

@@ -42,7 +42,7 @@ inputs.claude-desktop.packages.${system}.claude-desktop-with-fhs
 
 Both `x86_64-linux` and `aarch64-linux` are supported — upstream publishes amd64 and arm64 debs.
 
-> **Upgrading from the pre-native-build flake:** the desktop file is now upstream's `claude-desktop.desktop` (window class `claude-desktop`) instead of this flake's old `Claude.desktop`. If you had Claude pinned to your dock, re-pin it once after upgrading.
+> **Upgrading:** the desktop file is upstream's, and upstream renamed it in 1.20186.1 — it is now `com.anthropic.Claude.desktop` (window class `com.anthropic.Claude`), previously `claude-desktop.desktop`, and before the native-build switch this flake's own `Claude.desktop`. If you had Claude pinned to your dock, re-pin it once after upgrading.
 
 ## How it works
 

@@ -29,7 +29,7 @@ The package works by:
 2. Extracting it (via `dpkg-deb --fsys-tarfile | tar --no-same-permissions` — plain `dpkg-deb -x` fails in the sandbox on the SUID `chrome-sandbox`)
 3. Patching ELF rpaths with `autoPatchelfHook` (main binary, crashpad handler, bundled `virtiofsd`, `@ant/claude-native` and `node-pty` Node modules)
 4. Removing `chrome-sandbox` (can't be SUID in the store; the userns sandbox is used instead)
-5. Shipping upstream's desktop file (`claude-desktop.desktop`, window class `claude-desktop`) and hicolor icons, with `Exec` pointed at the wrapper
+5. Shipping upstream's desktop file (currently `com.anthropic.Claude.desktop`, window class `com.anthropic.Claude`) and hicolor icons, with every `Exec` pointed at the wrapper. The name is **not** hardcoded — upstream renamed it once already (`claude-desktop.desktop` → `com.anthropic.Claude.desktop` in 1.20186.1, which broke the build), so the install phase globs `share/applications/*.desktop`, requires exactly one match, and derives `CHROME_DESKTOP` from it
 6. Wrapping with Wayland-friendly Chromium flags (`--ozone-platform-hint=auto`, GlobalShortcutsPortal, Wayland IME; `CLAUDE_USE_X11=1` escape hatch)
 
 Key files:
