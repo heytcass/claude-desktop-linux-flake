@@ -1,0 +1,167 @@
+name: Build
+
+# Build verification for human-authored changes.
+#
+# The update-claude-desktop workflow already gates its own auto-bumps on a real
+# `nix build`, but that gate only existed inside the bot's path — a hand-written
+# PR got no build check at all. That gap is how the 1.20186.1 desktop-file
+# rename sat broken on main for two weeks: the bot correctly refused to open a
+# PR, and nothing else was watching.
+#
+# Note on branch protection: the build job is path-filtered, so a docs-only PR
+# never runs it. If you mark `build` as a required check, those PRs will block
+# forever waiting on a job that will never report. Either leave it unrequired or
+# add an always-run stub that satisfies the requirement.
+
+on:
+  pull_request:
+    paths:
+      - 'pkgs/**'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/build.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'pkgs/**'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APT_DIST: https://downloads.claude.ai/claude-desktop/apt/stable/dists/stable
+
+jobs:
+  # Cheap (~5s, no Nix, no download): confirm both pinned hashes match the
+  # signed apt Packages index. The arm64 deb is never downloaded by CI — the
+  # x86_64 build below only re-verifies the amd64 hash — so without this an
+  # arm64 typo or an arch-swapped repin ships silently and only breaks for
+  # aarch64 users.
+  hashes:
+    name: Pinned hashes match apt index
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare pinned hashes against the apt index
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -oP 'version = "\K[^"]+' pkgs/claude-desktop.nix | head -1)
+          echo "Pinned version: $VERSION"
+
+          rc=0
+          for arch in amd64 arm64; do
+            # Each fetchurl's url line (…_<arch>.deb") is immediately followed
+            # by its hash line, same coupling the repin step in
+            # update-claude-desktop.yml relies on.
+            PINNED=$(grep -A1 "_$arch.deb\";" pkgs/claude-desktop.nix \
+              | grep -oP 'hash = "\K[^"]+')
+            HEX=$(curl -fsSL "$APT_DIST/main/binary-$arch/Packages" \
+              | awk -v ver="$VERSION" '
+                  BEGIN { RS=""; FS="\n" }
+                  {
+                    v=""; s=""
+                    for (i = 1; i <= NF; i++) {
+                      if ($i ~ /^Version: /) v = substr($i, 10)
+                      if ($i ~ /^SHA256: /)  s = substr($i, 9)
+                    }
+                    if (v == ver) print s
+                  }' | head -1)
+
+            if [ -z "$HEX" ]; then
+              echo "::error::No $arch stanza for version $VERSION in the apt index"
+              rc=1
+              continue
+            fi
+
+            # hex -> SRI without needing Nix installed.
+            INDEX="sha256-$(printf '%s' "$HEX" | xxd -r -p | base64 -w0)"
+            if [ "$PINNED" = "$INDEX" ]; then
+              echo "$arch OK: $PINNED"
+            else
+              echo "::error::$arch hash mismatch — pinned $PINNED, index $INDEX"
+              rc=1
+            fi
+          done
+          exit $rc
+
+  build:
+    name: nix build (x86_64-linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v14
+
+      - name: Build
+        run: NIXPKGS_ALLOW_UNFREE=1 nix build .#claude-desktop --impure -L
+
+      # Codifies the automated rows of TESTING.md. autoPatchelfHook and
+      # fetchurl already failed the build above if deps or the amd64 hash were
+      # wrong; these cover the packaging invariants that can regress silently
+      # when upstream moves things around.
+      - name: Check packaging invariants
+        run: |
+          set -euo pipefail
+          OUT=$(readlink -f result)
+          rc=0
+
+          shopt -s nullglob
+          desktopFiles=("$OUT"/share/applications/*.desktop)
+          shopt -u nullglob
+          if [ ${#desktopFiles[@]} -ne 1 ]; then
+            echo "::error::expected exactly one .desktop file, found ${#desktopFiles[@]}"
+            exit 1
+          fi
+          desktopFile="${desktopFiles[0]}"
+          desktopName=$(basename "$desktopFile")
+          echo "Desktop file: $desktopName"
+
+          # Every Exec= must point into the store, not at a bare PATH lookup —
+          # a missed replacement still "works" on a machine that happens to
+          # have claude-desktop in PATH, so it can't be caught by launching it.
+          if grep -q '^Exec=claude-desktop' "$desktopFile"; then
+            echo "::error::unpatched PATH-relative Exec= in $desktopName"
+            grep -n '^Exec=' "$desktopFile"
+            rc=1
+          fi
+          # `|| true`: grep -c exits 1 on zero matches, which under `set -e`
+          # would abort here and skip the diagnostic below.
+          execCount=$(grep -c "^Exec=$OUT/bin/claude-desktop" "$desktopFile" || true)
+          echo "Exec= lines pointing at the wrapper: $execCount"
+          if [ "$execCount" -lt 1 ]; then
+            echo "::error::no Exec= line points at the wrapper"
+            rc=1
+          fi
+
+          # CHROME_DESKTOP drives Wayland/GNOME window-to-launcher association;
+          # if it drifts from the shipped filename nothing errors, windows just
+          # stop grouping under the app icon.
+          if ! grep -q "CHROME_DESKTOP='$desktopName'" "$OUT"/bin/claude-desktop; then
+            echo "::error::CHROME_DESKTOP does not match $desktopName"
+            grep -o "CHROME_DESKTOP.*" "$OUT"/bin/claude-desktop || true
+            rc=1
+          fi
+
+          # Must not be present at all: a non-SUID chrome-sandbox makes
+          # Chromium abort with a FATAL instead of falling back to userns.
+          if [ -e "$OUT/lib/claude-desktop/chrome-sandbox" ]; then
+            echo "::error::chrome-sandbox still present in the output"
+            rc=1
+          fi
+
+          # --inputs-from . resolves nixpkgs from this flake's lock rather than
+          # the default registry. nix-installer-action repoints that registry
+          # at FlakeHub (nixpkgs-weekly), which would make this step depend on
+          # a third-party service — one that already errors intermittently in
+          # this repo's CI — and validate with a different nixpkgs than the one
+          # that built the package.
+          nix shell --inputs-from . nixpkgs#desktop-file-utils \
+            -c desktop-file-validate "$desktopFile" || rc=1
+
+          exit $rc
