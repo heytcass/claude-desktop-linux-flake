@@ -55,6 +55,13 @@ let
   # `nix hash convert --hash-algo sha256 <hex>`.
   aptRepo = "https://downloads.claude.ai/claude-desktop/apt/stable";
 
+  # Keep each `url` line immediately followed by its `hash` line. Two workflows
+  # depend on that adjacency and neither can detect it breaking:
+  # update-claude-desktop.yml repins with `sed "/_<arch>.deb\";/{n;s|hash = ...}"`
+  # (`n` advances exactly one line), and build.yml reads the current pin back
+  # with `grep -A1 "_<arch>.deb\";"`. Reformatting this block — reordering the
+  # attributes, or inserting a comment between them — makes the repin silently
+  # rewrite the wrong line.
   srcs = {
     x86_64-linux = fetchurl {
       url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_amd64.deb";
