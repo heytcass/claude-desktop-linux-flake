@@ -146,7 +146,25 @@ jobs:
         delete-branch: true
 
     - name: Enable auto-merge
+      # `--auto` is load-bearing. Without it `gh pr merge` merges on the spot,
+      # and `--delete-branch` then removes the head branch two or three seconds
+      # after the PR was opened — before Actions can allocate a runner for the
+      # `pull_request` event. The queued Build and Claude Code runs resolve a
+      # ref that no longer exists and die as startup failures: zero jobs, one
+      # second, no logs. Every bot PR merged that way, so `Build gate` has never
+      # actually gated one.
+      #
+      # That is not just cosmetic. The build step above only re-verifies the
+      # *amd64* hash (that is the only deb fetchurl downloads on an x86_64
+      # runner); the arm64 hash is repinned from the index and otherwise
+      # unchecked. The `hashes` job in build.yml is the only thing that compares
+      # it, so until this PR waits for checks, an arch-swapped or mistyped arm64
+      # pin ships silently and breaks only for aarch64 users.
+      #
+      # Requires `Allow auto-merge` on the repo and `Build gate` marked as a
+      # required status check on main — `Build gate`, not `build` or `hashes`,
+      # which skip on docs-only changes and would deadlock.
       if: steps.pr.outputs.pull-request-number
-      run: gh pr merge ${{ steps.pr.outputs.pull-request-number }} --merge --delete-branch
+      run: gh pr merge ${{ steps.pr.outputs.pull-request-number }} --auto --merge --delete-branch
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
