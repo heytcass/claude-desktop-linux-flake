@@ -44,7 +44,7 @@
 }:
 let
   pname = "claude-desktop";
-  version = "2.7032.0";
+  version = "2.9939.4";
 
   # Official Anthropic apt repository for the native Linux build.
   # Version discovery: fetch
@@ -65,11 +65,11 @@ let
   srcs = {
     x86_64-linux = fetchurl {
       url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_amd64.deb";
-      hash = "sha256-Hn9FBLylsvay08QSPRRdcnZH538u4tBGhQcR5h59exE=";
+      hash = "sha256-PP3bI78pEeBeJ7TtOFa455XflGQ7LDW1nesxfPmVvKA=";
     };
     aarch64-linux = fetchurl {
       url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_arm64.deb";
-      hash = "sha256-bcp5+kyLZSZ3gLVGDGJxWYUuLfoq0BHQOgSI978ibsM=";
+      hash = "sha256-EI7XnqFksIxPoLtDh97vR3mVez8Pmy2YmONZ82Pr8bw=";
     };
   };
 in
