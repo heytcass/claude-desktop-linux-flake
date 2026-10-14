@@ -35,15 +35,18 @@ The package works by:
 Key files:
 
 - `/pkgs/claude-desktop.nix`: The package definition
+- `/pkgs/sources.json`: Pinned version + per-arch (`amd64`/`arm64`) deb hashes, read via `lib.importJSON`
 - `/flake.nix`: Flake outputs, including the FHS wrapper for MCP support
-- `/.github/workflows/update-claude-desktop.yml`: Weekly auto-update from the apt `Packages` index
-- `/.github/workflows/build.yml`: Build verification for hand-authored PRs — checks both arch hashes against the apt index, runs `nix build`, and asserts the packaging invariants (exactly one `.desktop` file, no unpatched `Exec=`, `CHROME_DESKTOP` matching it, no `chrome-sandbox`). `Build gate` is the job to mark required in branch protection; `build` and `hashes` skip on docs-only changes and would deadlock a required check
+- `/.github/workflows/update-claude-desktop.yml`: Daily auto-update. Reads the apt `Packages` index, rewrites `pkgs/sources.json` with `jq`, and opens/refreshes one rolling auto-merging PR on branch `update-claude-desktop`. Builds nothing itself. Opens the PR as a GitHub App (`UPDATER_APP_CLIENT_ID` variable + `UPDATER_APP_PRIVATE_KEY` secret) when configured, because Build runs on `GITHUB_TOKEN`-opened PRs wait for manual approval; falls back to `GITHUB_TOKEN` otherwise
+- `/.github/workflows/build.yml`: The gate for every PR, bot or human — runs `nix build` natively on x86_64 and aarch64 (so fetchurl verifies both deb hashes and autoPatchelf checks both arches' deps) and asserts the packaging invariants (exactly one `.desktop` file, no unpatched `Exec=`, `CHROME_DESKTOP` matching it, no `chrome-sandbox`). `Build gate` is the job to mark required in branch protection; the `build` matrix legs skip on docs-only changes and would deadlock a required check
 
 ### Updating for a new version
 
 CI does this automatically, but by hand: read the latest `Version`/`SHA256` per arch from
 `https://downloads.claude.ai/claude-desktop/apt/stable/dists/stable/main/binary-{amd64,arm64}/Packages`,
-convert hashes with `nix hash convert --hash-algo sha256 <hex>`, and update `version` plus both `hash` fields in `/pkgs/claude-desktop.nix`.
+convert hashes with `nix hash convert --hash-algo sha256 <hex>`, and update `version` plus both entries under `hashes` in `/pkgs/sources.json`.
+
+If a new release breaks the build (e.g. a new `DT_NEEDED` library), the bot PR goes red and doesn't merge. Fix it in a separate PR to `main` — don't push to the `update-claude-desktop` branch, the next daily run rewrites it from `main` and picks the fix up.
 
 ### Host caveats (see README for details)
 

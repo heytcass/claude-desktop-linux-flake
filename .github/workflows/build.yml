@@ -1,15 +1,13 @@
 name: Build
 
-# Build verification for human-authored changes.
+# The build gate for every PR, hand-written or opened by the
+# update-claude-desktop workflow (which no longer builds anything itself).
+# Builds both architectures on native runners, so fetchurl re-verifies both
+# pinned deb hashes against the real downloads and autoPatchelfHook catches
+# new dependencies on either arch.
 #
-# The update-claude-desktop workflow already gates its own auto-bumps on a real
-# `nix build`, but that gate only existed inside the bot's path — a hand-written
-# PR got no build check at all. That gap is how the 1.20186.1 desktop-file
-# rename sat broken on main for two weeks: the bot correctly refused to open a
-# PR, and nothing else was watching.
-#
-# Branch protection: mark **`Build gate`** as the required check, not `build`
-# or `hashes`.
+# Branch protection: mark **`Build gate`** as the required check, not the
+# `build` matrix legs, which skip on docs-only changes.
 #
 # Path filtering deliberately lives on the jobs, not on `on:`. A filter at the
 # `on:` level skips the whole workflow on a docs-only PR, so a required check
@@ -28,9 +26,6 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  APT_DIST: https://downloads.claude.ai/claude-desktop/apt/stable/dists/stable
-
 jobs:
   # Decides whether anything build-relevant changed. Done with git rather than a
   # third-party paths-filter action to keep the dependency surface small.
@@ -40,7 +35,7 @@ jobs:
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -91,78 +86,32 @@ jobs:
             echo "-> build-relevant changes found"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
-            echo "-> nothing build-relevant; build and hashes will be skipped"
+            echo "-> nothing build-relevant; build will be skipped"
           fi
 
-  # Cheap (~5s, no Nix, no download): confirm both pinned hashes match the
-  # signed apt Packages index. The arm64 deb is never downloaded by CI — the
-  # x86_64 build below only re-verifies the amd64 hash — so without this an
-  # arm64 typo or an arch-swapped repin ships silently and only breaks for
-  # aarch64 users.
-  #
-  # Gated on `changes` despite being cheap: it asserts the pinned version still
-  # has a stanza in the index, so if upstream ever prunes old versions it would
-  # start failing on unrelated PRs. Scoping it to PRs that touch the pin bounds
-  # that false positive to changes you'd be reviewing anyway.
-  hashes:
-    name: Pinned hashes match apt index
-    needs: changes
-    if: needs.changes.outputs.relevant == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Compare pinned hashes against the apt index
-        run: |
-          set -euo pipefail
-          VERSION=$(grep -oP 'version = "\K[^"]+' pkgs/claude-desktop.nix | head -1)
-          echo "Pinned version: $VERSION"
-
-          rc=0
-          for arch in amd64 arm64; do
-            # Each fetchurl's url line (…_<arch>.deb") is immediately followed
-            # by its hash line, same coupling the repin step in
-            # update-claude-desktop.yml relies on.
-            PINNED=$(grep -A1 "_$arch.deb\";" pkgs/claude-desktop.nix \
-              | grep -oP 'hash = "\K[^"]+')
-            HEX=$(curl -fsSL "$APT_DIST/main/binary-$arch/Packages" \
-              | awk -v ver="$VERSION" '
-                  BEGIN { RS=""; FS="\n" }
-                  {
-                    v=""; s=""
-                    for (i = 1; i <= NF; i++) {
-                      if ($i ~ /^Version: /) v = substr($i, 10)
-                      if ($i ~ /^SHA256: /)  s = substr($i, 9)
-                    }
-                    if (v == ver) print s
-                  }' | head -1)
-
-            if [ -z "$HEX" ]; then
-              echo "::error::No $arch stanza for version $VERSION in the apt index"
-              rc=1
-              continue
-            fi
-
-            # hex -> SRI without needing Nix installed.
-            INDEX="sha256-$(printf '%s' "$HEX" | xxd -r -p | base64 -w0)"
-            if [ "$PINNED" = "$INDEX" ]; then
-              echo "$arch OK: $PINNED"
-            else
-              echo "::error::$arch hash mismatch — pinned $PINNED, index $INDEX"
-              rc=1
-            fi
-          done
-          exit $rc
-
   build:
-    name: nix build (x86_64-linux)
+    name: nix build (${{ matrix.system }})
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      # Report both arches even when one fails.
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          # Free for public repos. Before this the arm64 deb was never even
+          # downloaded by CI, so its hash and its dependencies went unchecked.
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: DeterminateSystems/nix-installer-action@v14
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build
         run: NIXPKGS_ALLOW_UNFREE=1 nix build .#claude-desktop --impure -L
@@ -222,11 +171,8 @@ jobs:
           fi
 
           # --inputs-from . resolves nixpkgs from this flake's lock rather than
-          # the default registry. nix-installer-action repoints that registry
-          # at FlakeHub (nixpkgs-weekly), which would make this step depend on
-          # a third-party service — one that already errors intermittently in
-          # this repo's CI — and validate with a different nixpkgs than the one
-          # that built the package.
+          # the global registry, so this validates with the same nixpkgs that
+          # built the package.
           nix shell --inputs-from . nixpkgs#desktop-file-utils \
             -c desktop-file-validate "$desktopFile" || rc=1
 
@@ -240,18 +186,18 @@ jobs:
   # one. Anything else (failure, cancelled) fails the gate.
   gate:
     name: Build gate
-    needs: [changes, hashes, build]
+    needs: [changes, build]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check upstream job results
         env:
           CHANGES: ${{ needs.changes.result }}
-          HASHES: ${{ needs.hashes.result }}
+          # Aggregated over the matrix: failure if either arch failed.
           BUILD: ${{ needs.build.result }}
         run: |
           set -euo pipefail
-          echo "changes=$CHANGES  hashes=$HASHES  build=$BUILD"
+          echo "changes=$CHANGES  build=$BUILD"
           rc=0
 
           # Change detection failing is itself a gate failure: without it we
@@ -268,8 +214,7 @@ jobs:
               *)       echo "::error::$1 did not pass ($2)"; rc=1 ;;
             esac
           }
-          check hashes "$HASHES"
-          check build  "$BUILD"
+          check build "$BUILD"
 
           [ $rc -eq 0 ] && echo "Gate passed." || echo "Gate failed."
           exit $rc
