@@ -6,13 +6,13 @@ graphical session and a human, and is meant to be run on the testbed.
 
 ## Automatically verified (build + CI)
 
-These fail the build or the `update-claude-desktop` workflow if they regress:
+These fail the build — and so `Build gate` on the PR, including the automated update PR — if they regress:
 
 | Check | How |
 | --- | --- |
-| Deb matches the apt index | `fetchurl` verifies the pinned SHA256 (repinned by CI from the signed apt `Packages` index) |
+| Deb matches the apt index | `fetchurl` verifies the pinned SHA256 for both arches (repinned into `pkgs/sources.json` by CI from the signed apt `Packages` index) |
 | Every ELF's dependencies resolve | `autoPatchelfHook` fails the build on any unsatisfied `DT_NEEDED` (covers the main binary, crashpad, bundled virtiofsd, native Node modules) |
-| Package builds end to end | `nix build .#claude-desktop` (run by CI on every version bump) |
+| Package builds end to end | `nix build .#claude-desktop` (run by CI natively on x86_64 and aarch64 for every PR touching `pkgs/` or `flake.*`) |
 | `claude://` is registered | upstream desktop file ships `MimeType=x-scheme-handler/claude`; `update-desktop-database` maps it to `com.anthropic.Claude.desktop` |
 | Desktop file is valid | `desktop-file-validate` (run manually below) |
 | Desktop file is found at all | the install phase globs `share/applications/*.desktop` and fails unless exactly one matches, so an upstream rename can't silently ship an unpatched `Exec=` |

@@ -44,33 +44,29 @@
 }:
 let
   pname = "claude-desktop";
-  version = "2.31226.1";
+  # Version and per-arch deb hashes. update-claude-desktop.yml rewrites this
+  # file with jq; to bump by hand, edit it directly (see CLAUDE.md).
+  sources = lib.importJSON ./sources.json;
+  inherit (sources) version;
 
   # Official Anthropic apt repository for the native Linux build.
   # Version discovery: fetch
-  #   ${aptRepo}/dists/stable/main/binary-amd64/Packages
-  # and read the last Package stanza's Version/Filename/SHA256 fields
-  # (one stanza per published version, oldest first; arm64 lives in
-  # binary-arm64). The SHA256 there is the deb's hash — convert with
-  # `nix hash convert --hash-algo sha256 <hex>`.
+  #   ${aptRepo}/dists/stable/main/binary-{amd64,arm64}/Packages
+  # and read the newest stanza's Version/SHA256 fields (one stanza per
+  # published version). The SHA256 there is the deb's hash in hex — convert
+  # with `nix hash convert --hash-algo sha256 <hex>`.
   aptRepo = "https://downloads.claude.ai/claude-desktop/apt/stable";
 
-  # Keep each `url` line immediately followed by its `hash` line. Two workflows
-  # depend on that adjacency and neither can detect it breaking:
-  # update-claude-desktop.yml repins with `sed "/_<arch>.deb\";/{n;s|hash = ...}"`
-  # (`n` advances exactly one line), and build.yml reads the current pin back
-  # with `grep -A1 "_<arch>.deb\";"`. Reformatting this block — reordering the
-  # attributes, or inserting a comment between them — makes the repin silently
-  # rewrite the wrong line.
+  debFor =
+    arch:
+    fetchurl {
+      url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_${arch}.deb";
+      hash = sources.hashes.${arch};
+    };
+
   srcs = {
-    x86_64-linux = fetchurl {
-      url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_amd64.deb";
-      hash = "sha256-Wpvr38sd9s44dns3Pzp/q/dxVqLd2KP10Elh2lveMF4=";
-    };
-    aarch64-linux = fetchurl {
-      url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_arm64.deb";
-      hash = "sha256-0vV6OP/HPP2mYPh3Kl+LraBebXQ5mUiiaMb11TWT7o8=";
-    };
+    x86_64-linux = debFor "amd64";
+    aarch64-linux = debFor "arm64";
   };
 in
 stdenv.mkDerivation {

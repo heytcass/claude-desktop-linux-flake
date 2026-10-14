@@ -1,14 +1,26 @@
 name: Update Claude Desktop
 
 # Reads the latest version from Anthropic's official apt repository Packages
-# index (the same metadata `apt upgrade` trusts), repins the flake's version
-# and per-arch deb hashes from the index's SHA256 fields, runs a real
-# `nix build` (which re-verifies the amd64 hash against the actual download),
-# then opens an auto-merging PR.
+# index (the same metadata `apt upgrade` trusts) and, if it differs from
+# pkgs/sources.json, rewrites the version and per-arch deb hashes and opens
+# (or refreshes) a single auto-merging PR.
+#
+# This workflow deliberately builds nothing. build.yml on the PR is the gate:
+# it builds both architectures, which re-verifies both hashes against the real
+# downloads. A release that breaks the build therefore shows up as a red PR
+# that never merges, rather than a failed scheduled run nobody looks at (how
+# 2.31226.1's new libpipewire dependency went unnoticed).
+#
+# Token: Build runs on PRs opened with GITHUB_TOKEN sit waiting for a
+# maintainer to approve them (#118's first run expired after 30 days; #125
+# waited six), so "auto-merge" was never automatic. When the UPDATER_APP_CLIENT_ID
+# variable and UPDATER_APP_PRIVATE_KEY secret are set, the PR is opened and
+# merged as that GitHub App instead and checks start on their own. Without
+# them it falls back to GITHUB_TOKEN and behaves as before.
 
 on:
   schedule:
-    - cron: '0 9 * * 1'  # Weekly, Mondays 09:00 UTC
+    - cron: '23 9 * * *'  # Daily, 09:23 UTC
   workflow_dispatch:
     inputs:
       version:
@@ -20,28 +32,34 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: update-claude-desktop
+  cancel-in-progress: false
+
 env:
   APT_DIST: https://downloads.claude.ai/claude-desktop/apt/stable/dists/stable
+  SOURCES: pkgs/sources.json
 
 jobs:
   check-and-update:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
+      uses: actions/checkout@v7
 
     - name: Determine latest version
       id: check
+      env:
+        FORCED: ${{ inputs.version }}
       run: |
         set -euo pipefail
 
-        CURRENT=$(grep -oP 'version = "\K[^"]+' pkgs/claude-desktop.nix | head -1)
+        CURRENT=$(jq -r .version "$SOURCES")
         echo "Current version: $CURRENT"
 
-        if [ -n "${{ inputs.version }}" ]; then
-          LATEST="${{ inputs.version }}"
+        if [ -n "$FORCED" ]; then
+          LATEST="$FORCED"
           echo "Forced version: $LATEST"
         else
           LATEST=$(curl -fsSL "$APT_DIST/main/binary-amd64/Packages" \
@@ -63,26 +81,19 @@ jobs:
           echo "Already on the latest version."
         fi
 
-    - name: Install Nix
+    - name: Repin pkgs/sources.json
       if: steps.check.outputs.needs_update == 'true'
-      uses: DeterminateSystems/nix-installer-action@v14
-
-    - name: Setup Nix cache
-      if: steps.check.outputs.needs_update == 'true'
-      uses: DeterminateSystems/magic-nix-cache-action@v7
-
-    - name: Repin flake (version + per-arch deb hashes)
-      if: steps.check.outputs.needs_update == 'true'
+      env:
+        LATEST: ${{ steps.check.outputs.latest }}
       run: |
         set -euo pipefail
-        LATEST="${{ steps.check.outputs.latest }}"
 
-        # Pull each arch's deb SHA256 from its Packages stanza and convert to
-        # SRI. The index is the same data apt itself trusts (signed InRelease);
-        # the amd64 hash is additionally verified by the nix build below when
-        # fetchurl downloads the real deb.
-        sha_for_arch() {
-          curl -fsSL "$APT_DIST/main/binary-$1/Packages" \
+        # Pull an arch's deb SHA256 (hex) from its Packages stanza and convert
+        # it to SRI. Nothing here is trusted on its own: build.yml builds both
+        # arches on the PR, so fetchurl checks each hash against the real deb.
+        sri_for_arch() {
+          local hex
+          hex=$(curl -fsSL "$APT_DIST/main/binary-$1/Packages" \
             | awk -v ver="$LATEST" '
                 BEGIN { RS=""; FS="\n" }
                 {
@@ -93,78 +104,76 @@ jobs:
                   }
                   if (v == ver) print s
                 }' \
-            | head -1
+            | head -1)
+          if ! [[ "$hex" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::No usable $1 SHA256 for version $LATEST (got '${hex}')" >&2
+            return 1
+          fi
+          printf 'sha256-%s' "$(printf '%s' "$hex" | xxd -r -p | base64 -w0)"
         }
 
-        for arch in amd64 arm64; do
-          SHA=$(sha_for_arch "$arch")
-          if [ -z "$SHA" ]; then
-            echo "::error::No $arch Packages stanza for version $LATEST"
-            exit 1
-          fi
-          SRI=$(nix hash convert --hash-algo sha256 --to sri "$SHA")
-          echo "$arch: $SRI"
-          # Each fetchurl's url line (…_<arch>.deb") is immediately followed
-          # by its hash line; scope the substitution to that line.
-          sed -i "/_$arch.deb\";/{n;s|hash = \"sha256-[^\"]*\"|hash = \"$SRI\"|}" \
-            pkgs/claude-desktop.nix
-        done
+        AMD64=$(sri_for_arch amd64)
+        ARM64=$(sri_for_arch arm64)
 
-        sed -i "s/version = \"[^\"]*\"/version = \"$LATEST\"/" pkgs/claude-desktop.nix
+        jq -n --arg version "$LATEST" --arg amd64 "$AMD64" --arg arm64 "$ARM64" \
+          '{version: $version, hashes: {amd64: $amd64, arm64: $arm64}}' > "$SOURCES"
+        cat "$SOURCES"
 
-        echo "--- Repinned srcs ---"
-        grep -A9 'srcs = {' pkgs/claude-desktop.nix
+    - name: Mint GitHub App token
+      id: app-token
+      if: steps.check.outputs.needs_update == 'true' && vars.UPDATER_APP_CLIENT_ID != ''
+      uses: actions/create-github-app-token@v3
+      with:
+        client-id: ${{ vars.UPDATER_APP_CLIENT_ID }}
+        private-key: ${{ secrets.UPDATER_APP_PRIVATE_KEY }}
+        permission-contents: write
+        permission-pull-requests: write
+        # Rebasing the rolling branch onto a main whose workflow files changed
+        # counts as "updating a workflow"; GitHub rejects that push without it.
+        # (GITHUB_TOKEN can't be granted this, so the fallback path fails in
+        # that one case until the stale PR is closed.)
+        permission-workflows: write
 
-    - name: Build
-      if: steps.check.outputs.needs_update == 'true'
-      run: |
-        # A real build is the gate: fetchurl re-verifies the amd64 deb hash
-        # against the actual download, and autoPatchelfHook fails the build
-        # if the new release grew a dependency we don't provide.
-        NIXPKGS_ALLOW_UNFREE=1 nix build .#claude-desktop --impure -L
-
-    - name: Create Pull Request
+    - name: Create or update pull request
       if: steps.check.outputs.needs_update == 'true'
       id: pr
-      uses: peter-evans/create-pull-request@v6
+      uses: peter-evans/create-pull-request@v8
       with:
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        # One rolling branch, so a newer release supersedes a stuck PR instead
+        # of opening a second one, and a fix landed on main (like a new
+        # buildInput) gets picked up by the next daily run rebasing the PR.
+        # Don't push fixes to this branch: the next run rewrites it from main.
+        branch: update-claude-desktop
+        delete-branch: true
         commit-message: |
           feat: update Claude Desktop to version ${{ steps.check.outputs.latest }}
 
-          Automated update from the Anthropic apt repository. Build passed.
+          Automated update from the Anthropic apt repository.
         title: 'Update Claude Desktop to version ${{ steps.check.outputs.latest }}'
         body: |
           ## Summary
           - Bumps Claude Desktop ${{ steps.check.outputs.current }} → ${{ steps.check.outputs.latest }}
           - Version detected from Anthropic's apt `Packages` index
-          - amd64 + arm64 deb hashes repinned from the index's SHA256 fields
-          - `nix build .#claude-desktop` passed (fetchurl re-verified the amd64 hash; autoPatchelf found all dependencies)
+          - amd64 + arm64 deb hashes repinned in `pkgs/sources.json` from the index's SHA256 fields
+
+          Auto-merges once `Build gate` passes (x86_64 + aarch64 `nix build`, which re-verifies both hashes against the real debs). If it fails, fix it on `main`; the next daily run rebases this PR onto the fix.
 
           🤖 Automated by the update-claude-desktop workflow.
-        branch: update-claude-desktop-${{ steps.check.outputs.latest }}
-        delete-branch: true
 
     - name: Enable auto-merge
-      # `--auto` is load-bearing. Without it `gh pr merge` merges on the spot,
-      # and `--delete-branch` then removes the head branch two or three seconds
-      # after the PR was opened — before Actions can allocate a runner for the
-      # `pull_request` event. The queued Build and Claude Code runs resolve a
-      # ref that no longer exists and die as startup failures: zero jobs, one
-      # second, no logs. Every bot PR merged that way, so `Build gate` has never
-      # actually gated one.
-      #
-      # That is not just cosmetic. The build step above only re-verifies the
-      # *amd64* hash (that is the only deb fetchurl downloads on an x86_64
-      # runner); the arm64 hash is repinned from the index and otherwise
-      # unchecked. The `hashes` job in build.yml is the only thing that compares
-      # it, so until this PR waits for checks, an arch-swapped or mistyped arm64
-      # pin ships silently and breaks only for aarch64 users.
-      #
-      # Requires `Allow auto-merge` on the repo and `Build gate` marked as a
-      # required status check on main — `Build gate`, not `build` or `hashes`,
-      # which skip on docs-only changes and would deadlock.
+      # `--auto` is load-bearing: without it `gh pr merge` merges on the spot,
+      # before build.yml has run. Requires `Allow auto-merge` on the repo and
+      # `Build gate` as a required status check on main.
       if: steps.pr.outputs.pull-request-number
-      run: gh pr merge ${{ steps.pr.outputs.pull-request-number }} --auto --merge --delete-branch
       env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        PR: ${{ steps.pr.outputs.pull-request-number }}
+      run: |
+        set -euo pipefail
+        # A refreshed PR already has auto-merge armed; leave it alone.
+        if [ "$(gh pr view "$PR" --json autoMergeRequest --jq '.autoMergeRequest != null')" = "true" ]; then
+          echo "Auto-merge already enabled on #$PR"
+        else
+          gh pr merge "$PR" --auto --merge --delete-branch
+        fi
