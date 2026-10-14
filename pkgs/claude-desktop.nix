@@ -26,6 +26,7 @@
   nspr,
   nss,
   pango,
+  pipewire,
   systemd,
   libx11,
   libxcomposite,
@@ -40,11 +41,10 @@
   libnotify,
   libpulseaudio,
   libsecret,
-  pipewire,
 }:
 let
   pname = "claude-desktop";
-  version = "2.9939.4";
+  version = "2.31226.1";
 
   # Official Anthropic apt repository for the native Linux build.
   # Version discovery: fetch
@@ -65,11 +65,11 @@ let
   srcs = {
     x86_64-linux = fetchurl {
       url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_amd64.deb";
-      hash = "sha256-PP3bI78pEeBeJ7TtOFa455XflGQ7LDW1nesxfPmVvKA=";
+      hash = "sha256-Wpvr38sd9s44dns3Pzp/q/dxVqLd2KP10Elh2lveMF4=";
     };
     aarch64-linux = fetchurl {
       url = "${aptRepo}/pool/main/c/claude-desktop/claude-desktop_${version}_arm64.deb";
-      hash = "sha256-EI7XnqFksIxPoLtDh97vR3mVez8Pmy2YmONZ82Pr8bw=";
+      hash = "sha256-0vV6OP/HPP2mYPh3Kl+LraBebXQ5mUiiaMb11TWT7o8=";
     };
   };
 in
@@ -106,6 +106,7 @@ stdenv.mkDerivation {
     nspr
     nss
     pango
+    pipewire # claude-native links it directly since 2.31226.1
     (lib.getLib stdenv.cc.cc) # libstdc++ for node-pty's pty.node
     (lib.getLib systemd) # libudev
     libx11
