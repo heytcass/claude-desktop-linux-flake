@@ -1,0 +1,70 @@
+name: Update notifications
+
+# @mentions the repo owner on the automated update PR, so GitHub Mobile sends
+# a push notification: once when an update merges, and once when one fails to
+# build. Nobody participates in those PRs otherwise (the App opens them, Actions
+# builds them, auto-merge merges them), so neither event notified anyone — which
+# is how the libpipewire break sat unnoticed.
+#
+# Comments are posted as github-actions[bot], so the mention reaches the owner.
+# Nothing here checks out or runs PR code; the PR title only reaches the shell
+# through env.
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+env:
+  BRANCH: update-claude-desktop
+  GH_REPO: ${{ github.repository }}
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  merged:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged &&
+      github.event.pull_request.head.ref == 'update-claude-desktop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping on merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          gh pr comment "$PR" --body "@$OWNER Merged: ${TITLE}. Run \`nix flake update\` to pick it up."
+
+  build-failed:
+    # One ping per failed build. A red update PR only rebuilds when main moves
+    # (the daily run pushes nothing otherwise), so this doesn't repeat daily.
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_branch == 'update-claude-desktop' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping on build failure
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          PR=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            echo "No open PR on $BRANCH; nothing to ping."
+            exit 0
+          fi
+          gh pr comment "$PR" --body "@$OWNER This update failed to build: $RUN_URL
+
+          It won't merge until that's fixed. Land the fix on \`main\`; the next daily run rebases this PR onto it."
