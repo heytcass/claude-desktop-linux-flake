@@ -39,6 +39,7 @@ Key files:
 - `/flake.nix`: Flake outputs, including the FHS wrapper for MCP support
 - `/.github/workflows/update-claude-desktop.yml`: Daily auto-update. Reads the apt `Packages` index, rewrites `pkgs/sources.json` with `jq`, and opens/refreshes one rolling auto-merging PR on branch `update-claude-desktop`. Builds nothing itself. Opens the PR as a GitHub App (`UPDATER_APP_CLIENT_ID` variable + `UPDATER_APP_PRIVATE_KEY` secret) when configured, because Build runs on `GITHUB_TOKEN`-opened PRs wait for manual approval; falls back to `GITHUB_TOKEN` otherwise
 - `/.github/workflows/build.yml`: The gate for every PR, bot or human — runs `nix build` natively on x86_64 and aarch64 (so fetchurl verifies both deb hashes and autoPatchelf checks both arches' deps) and asserts the packaging invariants (exactly one `.desktop` file, no unpatched `Exec=`, `CHROME_DESKTOP` matching it, no `chrome-sandbox`). `Build gate` is the job to mark required in branch protection; the `build` matrix legs skip on docs-only changes and would deadlock a required check
+- `/.github/workflows/update-notify.yml`: @mentions the repo owner on the `update-claude-desktop` PR when it merges or its Build fails, so GitHub Mobile sends a push (nobody participates in the bot PRs otherwise)
 
 ### Updating for a new version
 
