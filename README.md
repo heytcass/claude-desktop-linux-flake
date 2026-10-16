@@ -56,7 +56,7 @@ Anthropic publishes the Linux build to an apt repository at
 
 The deb's Debian maintainer scripts (AppArmor profile, apt source registration) are intentionally not replicated — they don't apply on NixOS.
 
-Updates are automated: the daily `update-claude-desktop` workflow reads the apt `Packages` index, repins version + per-arch hashes, and opens an auto-merging PR gated on a real `nix build` of both x86_64 and aarch64.
+Updates are automated: the hourly `update-claude-desktop` workflow reads the apt `Packages` index, repins version + per-arch hashes, and opens an auto-merging PR gated on a real `nix build` of both x86_64 and aarch64.
 
 ## Display backend & global shortcuts
 
@@ -131,7 +131,7 @@ Anthropic's official deb, or see:
 
 # Known limitations
 
-- **In-app auto-update is intentionally inert.** On Nix the store path is read-only, so the app can't update itself (on regular distros, updates flow through apt). Updates are this repo's job instead: the daily `update-claude-desktop` workflow repins the flake from the apt index. Bump your flake input to get the new version.
+- **In-app auto-update is intentionally inert.** On Nix the store path is read-only, so the app can't update itself (on regular distros, updates flow through apt). Updates are this repo's job instead: the hourly `update-claude-desktop` workflow repins the flake from the apt index. Bump your flake input to get the new version.
 - **Cowork's VM sandbox needs host virtualization.** The deb Recommends `qemu-system-x86`, `ovmf`, and `virtiofsd` (a `virtiofsd` is bundled and patched, but qemu/OVMF must come from the host). Without them, Cowork VM features won't start.
 - **Native Wayland global shortcuts depend on your compositor's portal.** See [Display backend & global shortcuts](#display-backend--global-shortcuts) — they work on GNOME 48+/KDE but are a no-op on portals without a GlobalShortcuts backend; use `CLAUDE_USE_X11=1` there.
 - **Sandbox and GPU acceleration need one-time setup on non-NixOS hosts.** See the two sections above.

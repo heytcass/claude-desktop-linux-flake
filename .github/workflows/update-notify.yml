@@ -45,7 +45,7 @@ jobs:
 
   build-failed:
     # One ping per failed build. A red update PR only rebuilds when main moves
-    # (the daily run pushes nothing otherwise), so this doesn't repeat daily.
+    # (the hourly run pushes nothing otherwise), so this doesn't repeat.
     if: >-
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.event == 'pull_request' &&
@@ -67,4 +67,4 @@ jobs:
           fi
           gh pr comment "$PR" --body "@$OWNER This update failed to build: $RUN_URL
 
-          It won't merge until that's fixed. Land the fix on \`main\`; the next daily run rebases this PR onto it."
+          It won't merge until that's fixed. Land the fix on \`main\`; the next hourly run rebases this PR onto it."
