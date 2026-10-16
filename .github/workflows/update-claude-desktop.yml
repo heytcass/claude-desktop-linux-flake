@@ -1,6 +1,6 @@
 name: Update Claude Desktop
 
-# Reads the latest version from Anthropic's official apt repository Packages
+# Hourly: reads the latest version from Anthropic's official apt repository Packages
 # index (the same metadata `apt upgrade` trusts) and, if it differs from
 # pkgs/sources.json, rewrites the version and per-arch deb hashes and opens
 # (or refreshes) a single auto-merging PR.
@@ -20,7 +20,12 @@ name: Update Claude Desktop
 
 on:
   schedule:
-    - cron: '23 9 * * *'  # Daily, 09:23 UTC
+    # Hourly, not daily: GitHub delays scheduled runs under load and sometimes
+    # drops them. The once-a-day 09:23 run fired at 14:13 on 2026-10-15 and not
+    # at all by 13:00 the next day, while 2.42304.0 sat in the index. A run with
+    # nothing new takes ~10s, so polling hourly costs nothing and a missed run
+    # is covered by the next one.
+    - cron: '23 * * * *'
   workflow_dispatch:
     inputs:
       version:
@@ -142,7 +147,7 @@ jobs:
         token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
         # One rolling branch, so a newer release supersedes a stuck PR instead
         # of opening a second one, and a fix landed on main (like a new
-        # buildInput) gets picked up by the next daily run rebasing the PR.
+        # buildInput) gets picked up by the next run rebasing the PR.
         # Don't push fixes to this branch: the next run rewrites it from main.
         branch: update-claude-desktop
         delete-branch: true
@@ -157,7 +162,7 @@ jobs:
           - Version detected from Anthropic's apt `Packages` index
           - amd64 + arm64 deb hashes repinned in `pkgs/sources.json` from the index's SHA256 fields
 
-          Auto-merges once `Build gate` passes (x86_64 + aarch64 `nix build`, which re-verifies both hashes against the real debs). If it fails, fix it on `main`; the next daily run rebases this PR onto the fix.
+          Auto-merges once `Build gate` passes (x86_64 + aarch64 `nix build`, which re-verifies both hashes against the real debs). If it fails, fix it on `main`; the next hourly run rebases this PR onto the fix.
 
           🤖 Automated by the update-claude-desktop workflow.
 
